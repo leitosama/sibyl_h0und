@@ -3,20 +3,20 @@ import json
 from types import SimpleNamespace
 from typing import Any, cast
 
-from bluesec1_agent.agent import SimpleSGRAgent
-from bluesec1_agent.models import (
-    FinishInvestigationArtifact,
-    FinishInvestigationRequest,
-    GetEntityRequest,
-    MaliciousFinishInvestigationSubmission,
-    NextStep,
-)
 from bluesec1_client import (
     PublicTask,
     RemoteBenchmarkClient,
     RemoteBenchmarkSession,
     TaskResult,
     ToolCallResult,
+)
+from sibyl_h0und.agent import SimpleSGRAgent
+from sibyl_h0und.models import (
+    FinishInvestigationArtifact,
+    FinishInvestigationRequest,
+    GetEntityRequest,
+    MaliciousFinishInvestigationSubmission,
+    NextStep,
 )
 
 

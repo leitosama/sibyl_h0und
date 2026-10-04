@@ -5,11 +5,11 @@ from typing import Any, cast
 import pytest
 from openai import AsyncOpenAI
 
-from bluesec1_agent.llm import (
+from sibyl_h0und.llm import (
     OpenAIStructuredStepClient,
     parse_next_step_payload,
 )
-from bluesec1_agent.models import (
+from sibyl_h0und.models import (
     NEXT_STEP_RESPONSE_FORMAT,
     BenignFinishInvestigationSubmission,
     FinishInvestigationEntityEvidence,

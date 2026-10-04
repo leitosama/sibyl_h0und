@@ -10,7 +10,7 @@ from openai.types.chat import ChatCompletionMessageParam
 from openai.types.shared_params import ResponseFormatJSONSchema
 from pydantic import ValidationError
 
-from bluesec1_agent.models import (
+from sibyl_h0und.models import (
     NEXT_STEP_RESPONSE_FORMAT,
     FinishInvestigationRequest,
     NextStep,

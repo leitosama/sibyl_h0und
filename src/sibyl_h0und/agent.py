@@ -4,13 +4,13 @@ from typing import Any
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
-from bluesec1_agent.llm import StructuredStepClient, render_json
 from bluesec1_client import (
     RemoteBenchmarkClient,
     RemoteBenchmarkSession,
     TaskResult,
     ToolCallResult,
 )
+from sibyl_h0und.llm import StructuredStepClient, render_json
 
 SYSTEM_PROMPT = """
 You are a pragmatic senior SOC analyst investigating one security alert.

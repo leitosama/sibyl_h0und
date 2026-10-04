@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from bluesec1_agent import cli
-from bluesec1_agent.settings import Settings
 from bluesec1_client import RunCapacityExceededError
+from sibyl_h0und import cli
+from sibyl_h0und.settings import Settings
 
 
 def test_settings_accept_explicit_runtime_and_provider_values() -> None:

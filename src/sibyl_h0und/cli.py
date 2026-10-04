@@ -6,9 +6,6 @@ import sys
 import truststore
 from pydantic import ValidationError
 
-from bluesec1_agent.agent import SimpleSGRAgent
-from bluesec1_agent.llm import OpenAIStructuredStepClient
-from bluesec1_agent.settings import Settings
 from bluesec1_client import (
     CompetitionClosedError,
     RemoteAuthenticationError,
@@ -17,6 +14,9 @@ from bluesec1_client import (
     RemoteUnavailableError,
     RunCapacityExceededError,
 )
+from sibyl_h0und.agent import SimpleSGRAgent
+from sibyl_h0und.llm import OpenAIStructuredStepClient
+from sibyl_h0und.settings import Settings
 
 
 def build_parser() -> argparse.ArgumentParser:
