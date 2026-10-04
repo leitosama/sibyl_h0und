@@ -36,12 +36,12 @@ class Settings(BaseSettings):
         max_length=64,
     )
     remote_run_label: str = Field(
-        default="bluesec1-agent",
+        default="sibyl-h0und",
         validation_alias="REMOTE_RUN_LABEL",
         min_length=1,
     )
     agent_name: str = Field(
-        default="bluesec1-agent",
+        default="sibyl-h0und",
         validation_alias="AGENT_NAME",
         min_length=1,
         max_length=255,
