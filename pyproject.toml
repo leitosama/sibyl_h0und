@@ -17,8 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-h0und1 = "sibyl_h0und.cli:main"
-h0und2 = "sibyl_h0und.cli:main"
+h0und = "sibyl_h0und.cli:main"
 
 [build-system]
 requires = ["hatchling"]

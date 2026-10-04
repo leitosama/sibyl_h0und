@@ -26,7 +26,8 @@ no network or keys, so tests must not reach the runtime or an LLM.
 - Every runtime tool call costs score. Do not add calls that repeat a known
   entity or relation lookup, and do not add a fixed step budget.
 - `finish_investigation` may cite only ids the runtime actually returned.
-- `h0und1` must never wait for a human.
+- A run against an arena must never wait for a human; interactive debug
+  modes work only offline.
 - Never commit `.env*` (except `.env.example`), task dumps or traces. Traces
   live outside the repository. Keep at most 1–2 anonymized tasks in
   `tests/fixtures/`.

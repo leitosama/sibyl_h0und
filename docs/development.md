@@ -6,8 +6,8 @@
 
 ```bash
 uv sync
-cp .env.example .env.h0und1   # ключ для соревнования, AGENT_NAME=h0und1
-cp .env.example .env.h0und2   # ключ для разработки,   AGENT_NAME=h0und2
+cp .env.example .env.h0und2   # токен для разработки, AGENT_NAME=h0und2
+cp .env.example .env.h0und1   # токен для зачёта,     AGENT_NAME=h0und1
 ```
 
 В профилях задаются `SCENARIO_RUNTIME_TOKEN` (с сайта соревнования) и
@@ -17,8 +17,8 @@ cp .env.example .env.h0und2   # ключ для разработки,   AGENT_NA
 Запуск:
 
 ```bash
-uv run --env-file .env.h0und2 h0und2   # разработка
-uv run --env-file .env.h0und1 h0und1   # бенч или зачёт
+uv run --env-file .env.h0und2 h0und   # разработка и бенчи до 10 октября
+uv run --env-file .env.h0und1 h0und   # зачёт 10 октября
 ```
 
 `--env-file` обязателен: gRPC берёт `GRPC_DNS_RESOLVER` из окружения процесса.
