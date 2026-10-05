@@ -4,8 +4,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import httpx
 import pytest
-from openai import AsyncOpenAI
+from openai import (
+    APIConnectionError,
+    APIError,
+    APITimeoutError,
+    AsyncOpenAI,
+    AuthenticationError,
+    BadRequestError,
+)
 
 from sibyl_h0und.llm import (
     OpenAIStructuredStepClient,
@@ -27,19 +35,22 @@ from sibyl_h0und.trace import TaskTrace
 class FakeCompletions:
     """Queue-backed fake for the OpenAI chat completion endpoint."""
 
-    def __init__(self, contents: list[str]) -> None:
+    def __init__(self, contents: list[str | Exception]) -> None:
         """Store response content and request audit state."""
         self.contents = list(contents)
         self.requests: list[dict[str, Any]] = []
 
     async def create(self, **kwargs: Any) -> Any:
-        """Return the next queued assistant message."""
+        """Return the next queued assistant message or raise the queued error."""
         self.requests.append(kwargs)
+        content = self.contents.pop(0)
+        if isinstance(content, Exception):
+            raise content
         return SimpleNamespace(
             choices=[
                 SimpleNamespace(
                     message=SimpleNamespace(
-                        content=self.contents.pop(0),
+                        content=content,
                         refusal=None,
                     )
                 )
@@ -51,7 +62,7 @@ class FakeCompletions:
 class FakeOpenAI:
     """Minimal object graph required by `OpenAIStructuredStepClient`."""
 
-    def __init__(self, contents: list[str]) -> None:
+    def __init__(self, contents: list[str | Exception]) -> None:
         """Expose fake chat completions."""
         self.completions = FakeCompletions(contents)
         self.chat = SimpleNamespace(completions=self.completions)
@@ -103,12 +114,83 @@ def test_structured_client_repairs_malformed_response(tmp_path: Path) -> None:
     assert (trace.llm_calls, trace.llm_tokens) == (2, 34)
 
 
-def test_parser_rejects_inconsistent_completion_flag() -> None:
-    """A non-terminal function cannot claim that the investigation is complete."""
-    payload = valid_process_step().model_copy(update={"task_completed": True}).model_dump_json()
+def test_parser_accepts_finish_with_stale_completion_flag() -> None:
+    """A finish call must reach the runtime even when the model leaves the flag false."""
+    finish = FinishInvestigationRequest(
+        tool="finish_investigation",
+        submission=BenignFinishInvestigationSubmission(
+            verdict="benign",
+            legitimacy_evidence=[
+                FinishInvestigationEntityEvidence(
+                    anchor="entity", entity_id="entity-1", property_fields=["cmdline"]
+                )
+            ],
+            reasoning="Routine activity.",
+        ),
+    )
+    payload = valid_process_step().model_copy(update={"function": finish}).model_dump_json()
 
-    with pytest.raises(ValueError, match="task_completed"):
-        parse_next_step_payload(payload)
+    step = parse_next_step_payload(payload)
+
+    assert isinstance(step.function, FinishInvestigationRequest)
+
+
+REQUEST = httpx.Request("POST", "https://llm.example/v1/chat/completions")
+
+
+def status_error(error_type: type[APIError], status: int, detail: str) -> APIError:
+    """Build the HTTP error the OpenAI client raises for one provider reply."""
+    body = {"detail": detail}
+    response = httpx.Response(status, json=body, request=REQUEST)
+    return error_type(f"Error code: {status} - {body}", response=response, body=body)
+
+
+PROXY_OUTAGE = status_error(BadRequestError, 400, "Open WebUI: Server Connection Error")
+CONTEXT_OVERFLOW = status_error(BadRequestError, 400, "maximum context length exceeded")
+BAD_KEY = status_error(AuthenticationError, 401, "invalid api key")
+CONNECTION = APIConnectionError(request=REQUEST)
+TIMEOUT = APITimeoutError(request=REQUEST)
+
+
+@pytest.mark.parametrize(
+    ("errors", "requests"),
+    [
+        pytest.param([PROXY_OUTAGE], 2, id="proxy-outage-recovers"),
+        pytest.param([CONNECTION] * 3, 4, id="last-retry-recovers"),
+        pytest.param([CONNECTION] * 4, 4, id="retries-run-out"),
+        pytest.param([TIMEOUT, TIMEOUT], 2, id="timeout-retried-once"),
+        pytest.param([CONTEXT_OVERFLOW], 1, id="context-overflow-fails-fast"),
+        pytest.param([BAD_KEY], 1, id="bad-key-fails-fast"),
+    ],
+)
+def test_structured_client_retries_only_transient_provider_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, errors: list[APIError], requests: int
+) -> None:
+    """Transient provider errors are retried a bounded number of times, others surface."""
+    fake_openai = FakeOpenAI([*errors, valid_process_step().model_dump_json()])
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(asyncio, "sleep", lambda _delay: real_sleep(0))
+    client = OpenAIStructuredStepClient(
+        base_url="https://llm.example/v1",
+        api_key="secret",
+        model="test-model",
+        timeout_seconds=10.0,
+        max_completion_tokens=1000,
+        max_retries=3,
+        client=cast(AsyncOpenAI, fake_openai),
+    )
+    trace = TaskTrace(tmp_path / "task.trace.jsonl")
+    messages = [{"role": "system", "content": "Investigate."}]
+
+    if requests > len(errors):
+        step = asyncio.run(client.next_step(messages, trace=trace))
+        assert step.function.tool == "get_entity"
+    else:
+        with pytest.raises(type(errors[requests - 1])):
+            asyncio.run(client.next_step(messages, trace=trace))
+    assert len(fake_openai.completions.requests) == requests
+    events = [json.loads(line) for line in trace.path.read_text(encoding="utf-8").splitlines()]
+    assert [event["kind"] for event in events].count("llm_error") == min(len(errors), requests)
 
 
 def test_response_schema_requires_nullable_tool_fields() -> None:
