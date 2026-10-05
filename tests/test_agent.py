@@ -18,6 +18,7 @@ from sibyl_h0und.models import (
     MaliciousFinishInvestigationSubmission,
     NextStep,
 )
+from sibyl_h0und.trace import TaskTrace
 
 
 class FakeStepClient:
@@ -32,11 +33,17 @@ class FakeStepClient:
         self.steps = list(steps)
         self.requests: list[list[dict[str, Any]]] = []
 
-    async def next_step(self, messages: list[dict[str, Any]]) -> NextStep:
+    async def next_step(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        trace: TaskTrace | None = None,
+    ) -> NextStep:
         """Record one conversation and return its next prepared step.
 
         Args:
             messages: Current LLM history.
+            trace: Ignored task trace.
 
         Returns:
             Next prepared structured step.

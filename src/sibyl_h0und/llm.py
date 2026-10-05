@@ -15,6 +15,7 @@ from sibyl_h0und.models import (
     FinishInvestigationRequest,
     NextStep,
 )
+from sibyl_h0und.trace import TaskTrace, elapsed_ms
 
 STRUCTURED_OUTPUT_INSTRUCTION = """
 Every assistant reply must be exactly one JSON object with these top-level fields:
@@ -48,7 +49,12 @@ class NextStepRequestError(RuntimeError):
 class StructuredStepClient(Protocol):
     """Narrow async contract consumed by the investigation loop."""
 
-    async def next_step(self, messages: list[dict[str, Any]]) -> NextStep:
+    async def next_step(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        trace: TaskTrace | None = None,
+    ) -> NextStep:
         """Generate and validate one investigation step."""
         ...
 
@@ -107,11 +113,17 @@ class OpenAIStructuredStepClient:
         if self._owns_client:
             await self._client.close()
 
-    async def next_step(self, messages: list[dict[str, Any]]) -> NextStep:
+    async def next_step(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        trace: TaskTrace | None = None,
+    ) -> NextStep:
         """Return one valid `NextStep`, repairing malformed replies when possible.
 
         Args:
             messages: Current investigation conversation.
+            trace: Task trace that receives one `llm_call` event per attempt.
 
         Returns:
             A locally validated structured investigation step.
@@ -135,20 +147,28 @@ class OpenAIStructuredStepClient:
 
         for attempt in range(1, self.max_retries + 1):
             started_at = time.perf_counter()
-            response = await self._client.chat.completions.create(
-                model=self.model,
-                messages=cast(list[ChatCompletionMessageParam], request_messages),
-                response_format=cast(ResponseFormatJSONSchema, NEXT_STEP_RESPONSE_FORMAT),
-                max_completion_tokens=self.max_completion_tokens,
-            )
-            latency_ms = int((time.perf_counter() - started_at) * 1000)
-            raw_content = extract_raw_content(response)
+            response: Any = None
+            try:
+                response = await self._client.chat.completions.create(
+                    model=self.model,
+                    messages=cast(list[ChatCompletionMessageParam], request_messages),
+                    response_format=cast(ResponseFormatJSONSchema, NEXT_STEP_RESPONSE_FORMAT),
+                    max_completion_tokens=self.max_completion_tokens,
+                )
+                raw_content = extract_raw_content(response)
+            except Exception as exc:
+                self._trace_attempt(
+                    trace, attempt, request_messages, response, elapsed_ms(started_at), exc
+                )
+                raise
+            latency_ms = elapsed_ms(started_at)
             total_tokens = response_total_tokens(response)
 
             try:
                 step = parse_next_step_payload(raw_content)
             except ValueError as exc:
                 last_error = exc
+                self._trace_attempt(trace, attempt, request_messages, response, latency_ms, exc)
                 logger.warning(
                     "Invalid structured LLM response on attempt {}/{}: {}",
                     attempt,
@@ -165,6 +185,7 @@ class OpenAIStructuredStepClient:
                 )
                 continue
 
+            self._trace_attempt(trace, attempt, request_messages, response, latency_ms, None)
             logger.info(
                 "LLM selected {} in {} ms using {} tokens.",
                 step.function.tool,
@@ -175,6 +196,51 @@ class OpenAIStructuredStepClient:
 
         message = str(last_error or ValueError("Unable to parse model response."))
         raise NextStepRequestError(message) from last_error
+
+    def _trace_attempt(
+        self,
+        trace: TaskTrace | None,
+        attempt: int,
+        request_messages: list[dict[str, Any]],
+        response: Any,
+        latency_ms: int,
+        error: Exception | None,
+    ) -> None:
+        """Record one provider request with its raw reply.
+
+        Args:
+            trace: Task trace, or `None` when the caller does not trace.
+            attempt: One-based attempt number within this step.
+            request_messages: Exact messages sent to the provider.
+            response: Provider response, or `None` when the request failed.
+            latency_ms: Request latency.
+            error: Request or validation failure of this attempt.
+        """
+        if trace is None:
+            return
+        raw_content = None
+        if response is not None:
+            try:
+                raw_content = extract_raw_content(response)
+            except ValueError:
+                raw_content = None
+        trace.record_llm_call(
+            tokens=response_total_tokens(response),
+            duration_ms=latency_ms,
+            attempt=attempt,
+            model=self.model,
+            finish_reason=response_finish_reason(response),
+            error=None if error is None else f"{type(error).__name__}: {error}",
+            payload={
+                "max_completion_tokens": self.max_completion_tokens,
+                "messages": request_messages,
+                "raw_content": raw_content,
+                "usage": response_usage(response),
+                "response": (
+                    response.model_dump(mode="json") if hasattr(response, "model_dump") else None
+                ),
+            },
+        )
 
 
 def extract_message_text(message: Any) -> str:
@@ -290,6 +356,39 @@ def response_total_tokens(response: Any) -> int:
     usage = getattr(response, "usage", None)
     total_tokens = getattr(usage, "total_tokens", 0)
     return total_tokens if isinstance(total_tokens, int) and total_tokens >= 0 else 0
+
+
+def response_finish_reason(response: Any) -> str | None:
+    """Read why the provider stopped generating the first choice.
+
+    Args:
+        response: OpenAI-compatible chat completion response.
+
+    Returns:
+        Finish reason such as `stop` or `length`, when present.
+    """
+    choices = getattr(response, "choices", None)
+    if not choices:
+        return None
+    finish_reason = getattr(choices[0], "finish_reason", None)
+    return finish_reason if isinstance(finish_reason, str) else None
+
+
+def response_usage(response: Any) -> dict[str, Any] | None:
+    """Return the provider usage block as plain JSON data.
+
+    Args:
+        response: OpenAI-compatible chat completion response.
+
+    Returns:
+        Usage fields, including provider-specific extras, when present.
+    """
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+    if hasattr(usage, "model_dump"):
+        return usage.model_dump(mode="json")
+    return dict(vars(usage))
 
 
 def render_json(value: Any) -> str:

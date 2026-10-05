@@ -3,6 +3,8 @@ from pathlib import Path
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from sibyl_h0und.trace import default_trace_dir
+
 _ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 
@@ -72,3 +74,5 @@ class Settings(BaseSettings):
         ge=1,
         le=100,
     )
+    trace_enabled: bool = Field(default=True, validation_alias="TRACE_ENABLED")
+    trace_dir: Path = Field(default_factory=default_trace_dir, validation_alias="TRACE_DIR")
