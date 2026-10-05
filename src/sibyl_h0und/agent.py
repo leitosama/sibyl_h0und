@@ -172,7 +172,11 @@ class SimpleSGRAgent:
                 "content": render_json(
                     {
                         "instruction": "Investigate this alert and submit the correct response.",
-                        "initial_observation": observation,
+                        "initial_observation": {
+                            key: _decode_json(value)
+                            for key, value in observation.items()
+                            if key not in {"available_tools", "last_tool_result"}
+                        },
                         "available_tools": tool_specs,
                     }
                 ),
@@ -333,20 +337,32 @@ class SimpleSGRAgent:
 
     @staticmethod
     def _tool_feedback(response: ToolCallResult) -> dict[str, Any]:
-        """Reduce a remote tool response to evidence needed by the LLM.
+        """Reduce a remote tool response to the new evidence it carries.
+
+        The alert and the tool catalog repeat in every observation and are
+        already in the first message. The step reward is never shown: it
+        leaks the grader's ground truth.
 
         Args:
             response: Server tool-call response.
 
         Returns:
-            Compact evidence and lifecycle flags.
+            Tool status, the complete tool result and the error, if any.
         """
-        return {
-            "tool_name": response.tool_name,
+        feedback = {
             "status": response.info.get("tool_status", "unknown"),
-            "result": response.info.get("tool_result", response.observation),
-            "error": response.info.get("error"),
-            "reward": response.reward,
-            "terminated": response.terminated,
-            "truncated": response.truncated,
+            "result": _decode_json(response.observation.get("last_tool_result")),
         }
+        if response.info.get("error") is not None:
+            feedback["error"] = response.info["error"]
+        return feedback
+
+
+def _decode_json(value: Any) -> Any:
+    """Parse a JSON-encoded string so the LLM sees it without escaping."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value

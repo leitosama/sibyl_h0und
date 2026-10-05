@@ -63,6 +63,7 @@ class TaskTrace:
         self.llm_ms = 0
         self.runtime_calls = 0
         self._seq = 0
+        self._last_llm_request: list[dict[str, Any]] = []
         self._started_at = time.perf_counter()
 
     @property
@@ -98,3 +99,49 @@ class TaskTrace:
                 file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
         except OSError as error:
             logger.warning("Skipping trace event {} in {}: {}", kind, self.path, error)
+
+    def llm_call(self, messages: list[dict[str, Any]], *, raw_content: str, **fields: Any) -> None:
+        """Append an `llm_call` event that stores only the request's new messages.
+
+        The payload keeps `prefix`, the number of leading messages shared with
+        the previous `llm_call` of this task, and the messages after it, so the
+        trace grows linearly with the history. `llm_requests` rebuilds the
+        full requests.
+
+        Args:
+            messages: Exact message list sent to the LLM.
+            raw_content: Model reply as received.
+            **fields: Small flat fields shown next to the common ones.
+        """
+        if self.path is None:
+            return
+        previous = self._last_llm_request
+        prefix = 0
+        while prefix < min(len(previous), len(messages)) and previous[prefix] == messages[prefix]:
+            prefix += 1
+        self._last_llm_request = list(messages)
+        self.event(
+            "llm_call",
+            payload={"prefix": prefix, "messages": messages[prefix:], "raw_content": raw_content},
+            **fields,
+        )
+
+
+def llm_requests(events: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Rebuild the full message list of every `llm_call` event of one task.
+
+    Args:
+        events: Events of one task trace in file order.
+
+    Returns:
+        One full request per `llm_call` event, in order.
+    """
+    requests: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("kind") != "llm_call":
+            continue
+        payload = event["payload"]
+        current = current[: payload.get("prefix", 0)] + payload["messages"]
+        requests.append(current)
+    return requests
