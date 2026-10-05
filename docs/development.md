@@ -57,17 +57,79 @@ uv run pytest
 
 ## Трейсы
 
-Запись трейсов пока не реализована, ниже описано, как она будет устроена.
+Каждый run пишет трейсы в каталог вне репозитория:
+`$TRACE_DIR` (по умолчанию `~/.local/share/sibyl_h0und/traces/`). Отключить
+запись можно через `TRACE_ENABLED=false`. Ошибка записи трейса не прерывает
+run: в лог попадает предупреждение, событие пропускается.
 
-Трейсы задач **не хранятся в репозитории**: они раздувают контекст агентов и
+Трейсы **не хранятся в репозитории**: они раздувают контекст агентов и
 сессий разработки, а публиковать содержимое задач правила запрещают.
-Пишем их в отдельный каталог вне репо (например, `~/.local/share/sibyl_h0und/traces/`).
 `traces/` и `*.trace.jsonl` на всякий случай добавлены в `.gitignore`.
+
+### Формат
+
+```
+traces/
+  20261005T120000Z_<run_id>/
+    001_<task_id>.trace.jsonl     одна задача, одно событие на строку
+    002_<task_id>.trace.jsonl
+```
+
+У каждой строки есть общие поля `ts`, `run_id`, `task_id`, `seq`, `step`,
+`kind`, у вызовов ещё `duration_ms`. Рядом лежат короткие поля события, а сырые
+данные — во вложенном `payload`.
+
+| `kind` | Плоские поля | `payload` |
+| --- | --- | --- |
+| `task_start` | — | `run`: настройки run'а без секретов (модель, лимиты, арена); `task`: задача целиком, включая `observation` и `available_tools` |
+| `llm_call` | `attempt`, `tokens` | `messages` (ровно то, что ушло в LLM), `raw_content` (ответ модели как есть) |
+| `step` | `tool` | `step`: разобранный `NextStep` |
+| `tool_call` | `tool`, `status`, `reward`, `terminated`, `truncated` или `error` | `arguments`, `response`: полный `ToolCallResult` от runtime |
+| `tool_rejected` | `tool` | `arguments` вызова, отклонённого локально |
+| `task_end` | `completion_reason`, `total_reward`, `quality_score`, `efficiency_score`, `tool_calls`, `steps_taken`, `agent_steps`, `runtime_calls`, `llm_calls`, `llm_tokens`, `llm_ms`, `error` | `task_result` |
+
+Один `llm_call` пишется на каждую попытку, включая ремонт невалидного ответа.
+Если агент упал, текст ошибки лежит в `error` у `task_end`. Ответы runtime
+сохраняются целиком, поэтому по трейсу задачу потом можно проиграть офлайн.
+Каждое событие дописывается в файл сразу, так что после падения остаётся всё,
+что было до него.
+
+### Просмотр
+
+Отдельного просмотрщика в коде нет, хватает готовых инструментов. В
+зависимости проекта они не входят, их ставят отдельно (`brew`, `apt` или
+`uv tool install visidata`).
+
+Одна задача по шагам:
+
+```bash
+T=~/.local/share/sibyl_h0und/traces/<run>/001_<task_id>.trace.jsonl
+jq -r 'select(.kind=="step") | "\(.step) \(.tool): \(.payload.step.current_state)"' $T
+jq -c 'select(.kind=="tool_call") | {step, tool, status, duration_ms, args: .payload.arguments}' $T
+jq 'select(.kind=="llm_call" and .step==3) | .payload.messages' $T   # контекст LLM на шаге 3
+vd $T     # visidata: таблица событий, Enter проваливается в payload
+jless $T  # или fx: сворачиваемый JSON
+```
+
+Сводка по прогонам через DuckDB (`duckdb` CLI или `uv run --with duckdb python`):
+
+```sql
+-- итоги задач по всем run'ам
+select run_id, task_id, completion_reason, total_reward, tool_calls, llm_tokens, duration_ms
+from read_json_auto('~/.local/share/sibyl_h0und/traces/*/*.trace.jsonl', union_by_name=true)
+where kind = 'task_end';
+
+-- на какие инструменты уходят вызовы и время
+select tool, count(*) as calls, avg(duration_ms) as avg_ms
+from read_json_auto('~/.local/share/sibyl_h0und/traces/<run>/*.trace.jsonl', union_by_name=true)
+where kind = 'tool_call'
+group by tool order by calls desc;
+```
 
 Разбор задачи в сессии с Claude: даём `task_id` и путь к трейсу, читаем
 нужные шаги и правим промпт или код в ветке.
 
-Офлайн-проигрывание записанных задач тоже планируемое. Ограничение:
+Офлайн-проигрывание записанных задач пока только планируется. Ограничение:
 записанная задача может ответить только на те вызовы, которые были в записи.
 Если агент после правки идёт по другому пути, такую задачу нужно перепроверять
 на арене.

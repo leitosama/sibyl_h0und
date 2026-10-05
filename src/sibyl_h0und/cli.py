@@ -82,6 +82,17 @@ async def run(args: argparse.Namespace) -> None:
         result = await SimpleSGRAgent(
             llm,
             max_steps=settings.agent_max_steps,
+            trace_dir=settings.trace_dir.expanduser() if settings.trace_enabled else None,
+            trace_metadata={
+                "agent_name": agent_name,
+                "run_label": args.run_label or settings.remote_run_label,
+                "arena": args.arena or settings.scenario_runtime_arena,
+                "endpoint": args.endpoint or settings.scenario_runtime_endpoint,
+                "model": settings.llm_default_model,
+                "llm_max_completion_tokens": settings.llm_max_completion_tokens,
+                "llm_max_step_retries": settings.llm_max_step_retries,
+                "agent_max_steps": settings.agent_max_steps,
+            },
         ).run(client)
 
     print(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))

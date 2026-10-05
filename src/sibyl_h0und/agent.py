@@ -1,4 +1,6 @@
 import json
+import time
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -11,6 +13,7 @@ from bluesec1_client import (
     ToolCallResult,
 )
 from sibyl_h0und.llm import StructuredStepClient, render_json
+from sibyl_h0und.trace import TaskTrace, elapsed_ms, run_trace_dir, task_trace_path
 
 SYSTEM_PROMPT = """
 You are a pragmatic senior SOC analyst investigating one security alert.
@@ -52,12 +55,21 @@ class AgentRunResult(BaseModel):
 class SimpleSGRAgent:
     """Run a typed one-action-per-turn LLM investigation loop."""
 
-    def __init__(self, llm: StructuredStepClient, *, max_steps: int = 100) -> None:
+    def __init__(
+        self,
+        llm: StructuredStepClient,
+        *,
+        max_steps: int = 100,
+        trace_dir: Path | None = None,
+        trace_metadata: dict[str, Any] | None = None,
+    ) -> None:
         """Store the LLM dependency and per-task step limit.
 
         Args:
             llm: Structured step generator used for every investigation turn.
             max_steps: Maximum total tool calls allowed for one task.
+            trace_dir: Root directory for run traces, or `None` to disable tracing.
+            trace_metadata: Non-secret run settings stored in every `task_start` event.
 
         Raises:
             ValueError: If the configured limit is not positive.
@@ -66,6 +78,8 @@ class SimpleSGRAgent:
             raise ValueError("max_steps must be positive")
         self.llm = llm
         self.max_steps = max_steps
+        self.trace_dir = trace_dir
+        self.trace_metadata = dict(trace_metadata or {})
 
     async def run(self, client: RemoteBenchmarkClient) -> AgentRunResult:
         """Consume the remote queue and aggregate authoritative task results.
@@ -83,16 +97,30 @@ class SimpleSGRAgent:
         if remote_run is None:
             raise RuntimeError("RemoteBenchmarkClient must be open before running the agent.")
 
+        run_dir = None
+        if self.trace_dir is not None:
+            run_dir = run_trace_dir(self.trace_dir, remote_run.run_id)
+            logger.info("Writing traces to {}", run_dir)
         task_results: list[TaskResult] = []
         while (session := await client.start_task()) is not None:
             logger.info("Starting structured investigation for task {}.", session.task_id)
+            trace_path = None
+            if run_dir is not None:
+                trace_path = task_trace_path(run_dir, len(task_results) + 1, session.task_id)
+            trace = TaskTrace(
+                trace_path,
+                run_id=remote_run.run_id,
+                task_id=session.task_id,
+            )
+            error_message: str | None = None
             try:
-                task_result = await self._investigate(session)
+                task_result = await self._investigate(session, trace)
             except Exception as exc:
                 logger.error("Task {} failed in the agent: {}", session.task_id, exc)
                 error_message = f"{type(exc).__name__}: {exc}"[:2_000]
                 aborted_result = await session.abort_task(error_message=error_message)
                 task_result = TaskResult.model_validate(aborted_result)
+            self._trace_task_end(trace, task_result, error_message)
             task_results.append(task_result)
 
         successful_tasks = sum(
@@ -105,11 +133,16 @@ class SimpleSGRAgent:
             task_results=task_results,
         )
 
-    async def _investigate(self, session: RemoteBenchmarkSession) -> TaskResult:
+    async def _investigate(
+        self,
+        session: RemoteBenchmarkSession,
+        trace: TaskTrace | None = None,
+    ) -> TaskResult:
         """Drive one leased task until its terminal investigation tool succeeds.
 
         Args:
             session: Active remote task session.
+            trace: Task trace that receives every LLM and runtime exchange.
 
         Returns:
             Authoritative terminal task result returned by the server.
@@ -118,7 +151,12 @@ class SimpleSGRAgent:
             ValueError: If the task observation has an invalid tool catalog.
             RuntimeError: If the agent exhausts its step budget.
         """
+        trace = trace or TaskTrace(None)
         observation = session.task.observation
+        trace.event(
+            "task_start",
+            payload={"run": self.trace_metadata, "task": session.task.model_dump(mode="json")},
+        )
         tool_specs = self._tool_specs(observation)
         available_tools = {
             specification["name"]
@@ -143,7 +181,8 @@ class SimpleSGRAgent:
         ]
 
         for step_index in range(1, self.max_steps + 1):
-            step = await self.llm.next_step(messages)
+            trace.step = step_index
+            step = await self.llm.next_step(messages, trace=trace)
             tool_name = step.function.tool
             arguments = step.function.model_dump(
                 mode="json",
@@ -151,6 +190,7 @@ class SimpleSGRAgent:
                 exclude={"tool"},
                 exclude_none=True,
             )
+            trace.event("step", tool=tool_name, payload={"step": step.model_dump(mode="json")})
             tool_call_id = f"step_{step_index}"
             messages.append(
                 {
@@ -178,8 +218,9 @@ class SimpleSGRAgent:
                     ),
                 }
                 logger.warning("Rejected unavailable tool {} locally.", tool_name)
+                trace.event("tool_rejected", tool=tool_name, payload={"arguments": arguments})
             else:
-                response = await session.call_tool(tool_name, arguments)
+                response = await self._call_tool(session, trace, tool_name, arguments)
                 feedback = self._tool_feedback(response)
                 logger.info(
                     "Tool {} returned status {}.",
@@ -199,6 +240,70 @@ class SimpleSGRAgent:
 
         raise RuntimeError(
             f"Agent hit the {self.max_steps}-step limit without finish_investigation."
+        )
+
+    @staticmethod
+    async def _call_tool(
+        session: RemoteBenchmarkSession,
+        trace: TaskTrace,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> ToolCallResult:
+        """Invoke one runtime tool and trace the exact request and full response.
+
+        Args:
+            session: Active remote task session.
+            trace: Task trace of this session.
+            tool_name: Advertised tool name.
+            arguments: Tool arguments sent to the runtime.
+
+        Returns:
+            Server tool-call response.
+        """
+        trace.runtime_calls += 1
+        started_at = time.perf_counter()
+        response = await session.call_tool(tool_name, arguments)
+        trace.event(
+            "tool_call",
+            duration_ms=elapsed_ms(started_at),
+            tool=tool_name,
+            status=response.info.get("tool_status"),
+            reward=response.reward,
+            terminated=response.terminated,
+            truncated=response.truncated,
+            payload={"arguments": arguments, "response": response.model_dump(mode="json")},
+        )
+        return response
+
+    @staticmethod
+    def _trace_task_end(
+        trace: TaskTrace,
+        task_result: TaskResult,
+        error_message: str | None,
+    ) -> None:
+        """Write the closing summary line of a task trace.
+
+        Args:
+            trace: Task trace to finish.
+            task_result: Authoritative result returned by the runtime.
+            error_message: Agent failure that aborted the task, if any.
+        """
+        trace.event(
+            "task_end",
+            duration_ms=trace.wall_ms,
+            completion_reason=task_result.completion_reason,
+            total_reward=task_result.total_reward,
+            quality_score=task_result.quality_score,
+            efficiency_score=task_result.efficiency_score,
+            tool_calls=task_result.tool_calls,
+            steps_taken=task_result.steps_taken,
+            agent_steps=trace.step,
+            runtime_calls=trace.runtime_calls,
+            llm_calls=trace.llm_calls,
+            llm_tokens=trace.llm_tokens,
+            llm_ms=trace.llm_ms,
+            error=error_message,
+            payload={"task_result": task_result.model_dump(mode="json")},
         )
 
     @staticmethod

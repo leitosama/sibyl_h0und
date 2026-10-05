@@ -15,6 +15,7 @@ from sibyl_h0und.models import (
     FinishInvestigationRequest,
     NextStep,
 )
+from sibyl_h0und.trace import TaskTrace
 
 STRUCTURED_OUTPUT_INSTRUCTION = """
 Every assistant reply must be exactly one JSON object with these top-level fields:
@@ -48,7 +49,9 @@ class NextStepRequestError(RuntimeError):
 class StructuredStepClient(Protocol):
     """Narrow async contract consumed by the investigation loop."""
 
-    async def next_step(self, messages: list[dict[str, Any]]) -> NextStep:
+    async def next_step(
+        self, messages: list[dict[str, Any]], *, trace: TaskTrace | None = None
+    ) -> NextStep:
         """Generate and validate one investigation step."""
         ...
 
@@ -107,11 +110,14 @@ class OpenAIStructuredStepClient:
         if self._owns_client:
             await self._client.close()
 
-    async def next_step(self, messages: list[dict[str, Any]]) -> NextStep:
+    async def next_step(
+        self, messages: list[dict[str, Any]], *, trace: TaskTrace | None = None
+    ) -> NextStep:
         """Return one valid `NextStep`, repairing malformed replies when possible.
 
         Args:
             messages: Current investigation conversation.
+            trace: Task trace that receives one `llm_call` event per attempt.
 
         Returns:
             A locally validated structured investigation step.
@@ -131,6 +137,7 @@ class OpenAIStructuredStepClient:
                 0,
                 {"role": "system", "content": STRUCTURED_OUTPUT_INSTRUCTION},
             )
+        trace = trace or TaskTrace(None)
         last_error: Exception | None = None
 
         for attempt in range(1, self.max_retries + 1):
@@ -144,6 +151,16 @@ class OpenAIStructuredStepClient:
             latency_ms = int((time.perf_counter() - started_at) * 1000)
             raw_content = extract_raw_content(response)
             total_tokens = response_total_tokens(response)
+            trace.llm_calls += 1
+            trace.llm_tokens += total_tokens
+            trace.llm_ms += latency_ms
+            trace.event(
+                "llm_call",
+                attempt=attempt,
+                tokens=total_tokens,
+                duration_ms=latency_ms,
+                payload={"messages": request_messages, "raw_content": raw_content},
+            )
 
             try:
                 step = parse_next_step_payload(raw_content)
