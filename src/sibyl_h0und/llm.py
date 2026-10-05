@@ -6,7 +6,16 @@ from types import TracebackType
 from typing import Any, Protocol, Self, cast
 
 from loguru import logger
-from openai import APIError, AsyncOpenAI
+from openai import (
+    APIConnectionError,
+    APIError,
+    APITimeoutError,
+    AsyncOpenAI,
+    BadRequestError,
+    ConflictError,
+    InternalServerError,
+    RateLimitError,
+)
 from openai.types.chat import ChatCompletionMessageParam
 from openai.types.shared_params import ResponseFormatJSONSchema
 from pydantic import ValidationError
@@ -37,9 +46,11 @@ Set task_completed=true only for a function whose tool is finish_investigation.
 Return no prose, markdown, XML, comments, or keys outside the required object.
 """.strip()
 
-# Seconds to wait before each repeated provider request after a transport or
-# HTTP error; the length bounds the extra requests, so a run never hangs.
+# Seconds to wait before each repeated provider request after a transient
+# error; the length bounds the extra requests, so a run never hangs.
 TRANSPORT_RETRY_DELAYS = (2.0, 5.0, 10.0)
+# A timeout already cost a full request timeout, so it is repeated only once.
+MAX_TIMEOUT_RETRIES = 1
 
 REPAIR_INSTRUCTION = (
     "Your previous reply violated the required NextStep contract. " + STRUCTURED_OUTPUT_INSTRUCTION
@@ -145,9 +156,7 @@ class OpenAIStructuredStepClient:
         last_error: Exception | None = None
 
         for attempt in range(1, self.max_retries + 1):
-            started_at = time.perf_counter()
-            response = await self._create_completion(request_messages, trace)
-            latency_ms = int((time.perf_counter() - started_at) * 1000)
+            response, latency_ms = await self._create_completion(request_messages, trace)
             raw_content = extract_raw_content(response)
             total_tokens = response_total_tokens(response)
             trace.llm_calls += 1
@@ -192,38 +201,67 @@ class OpenAIStructuredStepClient:
         message = str(last_error or ValueError("Unable to parse model response."))
         raise NextStepRequestError(message) from last_error
 
-    async def _create_completion(self, messages: list[dict[str, Any]], trace: TaskTrace) -> Any:
-        """Request one completion, repeating it after provider errors.
+    async def _create_completion(
+        self, messages: list[dict[str, Any]], trace: TaskTrace
+    ) -> tuple[Any, int]:
+        """Request one completion, repeating it after transient provider errors.
 
-        Proxies in front of the model answer transient outages with arbitrary
-        HTTP codes (an Open WebUI connection error arrives as 400), so every
-        `APIError` is retried after the next delay in `TRANSPORT_RETRY_DELAYS`.
+        Which errors are repeated is decided by `is_transient_error`. Each
+        failure is traced as an `llm_error` event.
 
         Args:
             messages: Request messages, including structured-output instructions.
-            trace: Task trace that receives one `llm_error` event per retried failure.
+            trace: Task trace that receives one `llm_error` event per failure.
 
         Returns:
-            Raw chat completion response.
+            Raw chat completion response and the latency of the successful request.
 
         Raises:
-            APIError: If the request still fails after every retry.
+            APIError: If the error is permanent or every retry failed.
         """
-        request = self._client.chat.completions.create
-        arguments: dict[str, Any] = {
-            "model": self.model,
-            "messages": cast(list[ChatCompletionMessageParam], messages),
-            "response_format": cast(ResponseFormatJSONSchema, NEXT_STEP_RESPONSE_FORMAT),
-            "max_completion_tokens": self.max_completion_tokens,
-        }
-        for delay in TRANSPORT_RETRY_DELAYS:
+        delays = iter(TRANSPORT_RETRY_DELAYS)
+        timeouts = 0
+        while True:
+            started_at = time.perf_counter()
             try:
-                return await request(**arguments)
+                response = await self._client.chat.completions.create(
+                    model=self.model,
+                    messages=cast(list[ChatCompletionMessageParam], messages),
+                    response_format=cast(ResponseFormatJSONSchema, NEXT_STEP_RESPONSE_FORMAT),
+                    max_completion_tokens=self.max_completion_tokens,
+                )
             except APIError as exc:
                 trace.event("llm_error", error=f"{type(exc).__name__}: {exc}"[:2_000])
+                timeouts += isinstance(exc, APITimeoutError)
+                delay = next(delays, None)
+                if delay is None or timeouts > MAX_TIMEOUT_RETRIES or not is_transient_error(exc):
+                    raise
                 logger.warning("LLM request failed, retrying in {} s: {}", delay, exc)
                 await asyncio.sleep(delay)
-        return await request(**arguments)
+                continue
+            return response, int((time.perf_counter() - started_at) * 1000)
+
+
+def is_transient_error(error: APIError) -> bool:
+    """Tell whether repeating the same provider request can succeed.
+
+    Connection failures, timeouts, rate limits, conflicts and server errors are
+    transient. A 400 is transient only when it reports a proxy connection
+    failure: Open WebUI answers an upstream outage with
+    `400 {'detail': 'Open WebUI: Server Connection Error'}`, while other 400s,
+    such as an exceeded context length, fail the same way on every attempt.
+
+    Args:
+        error: Error raised by the OpenAI-compatible client.
+
+    Returns:
+        Whether the request is worth repeating.
+    """
+    if isinstance(error, BadRequestError):
+        return "connection error" in str(error).lower()
+    return isinstance(
+        error, APIConnectionError | RateLimitError | ConflictError | InternalServerError
+    )
 
 
 def extract_message_text(message: Any) -> str:

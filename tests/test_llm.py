@@ -6,7 +6,14 @@ from typing import Any, cast
 
 import httpx
 import pytest
-from openai import APIConnectionError, AsyncOpenAI
+from openai import (
+    APIConnectionError,
+    APIError,
+    APITimeoutError,
+    AsyncOpenAI,
+    AuthenticationError,
+    BadRequestError,
+)
 
 from sibyl_h0und.llm import (
     OpenAIStructuredStepClient,
@@ -128,13 +135,39 @@ def test_parser_accepts_finish_with_stale_completion_flag() -> None:
     assert isinstance(step.function, FinishInvestigationRequest)
 
 
-@pytest.mark.parametrize(("failures", "recovers"), [(1, True), (4, False)])
-def test_structured_client_retries_provider_errors(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failures: int, recovers: bool
+REQUEST = httpx.Request("POST", "https://llm.example/v1/chat/completions")
+
+
+def status_error(error_type: type[APIError], status: int, detail: str) -> APIError:
+    """Build the HTTP error the OpenAI client raises for one provider reply."""
+    body = {"detail": detail}
+    response = httpx.Response(status, json=body, request=REQUEST)
+    return error_type(f"Error code: {status} - {body}", response=response, body=body)
+
+
+PROXY_OUTAGE = status_error(BadRequestError, 400, "Open WebUI: Server Connection Error")
+CONTEXT_OVERFLOW = status_error(BadRequestError, 400, "maximum context length exceeded")
+BAD_KEY = status_error(AuthenticationError, 401, "invalid api key")
+CONNECTION = APIConnectionError(request=REQUEST)
+TIMEOUT = APITimeoutError(request=REQUEST)
+
+
+@pytest.mark.parametrize(
+    ("errors", "requests"),
+    [
+        pytest.param([PROXY_OUTAGE], 2, id="proxy-outage-recovers"),
+        pytest.param([CONNECTION] * 3, 4, id="last-retry-recovers"),
+        pytest.param([CONNECTION] * 4, 4, id="retries-run-out"),
+        pytest.param([TIMEOUT, TIMEOUT], 2, id="timeout-retried-once"),
+        pytest.param([CONTEXT_OVERFLOW], 1, id="context-overflow-fails-fast"),
+        pytest.param([BAD_KEY], 1, id="bad-key-fails-fast"),
+    ],
+)
+def test_structured_client_retries_only_transient_provider_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, errors: list[APIError], requests: int
 ) -> None:
-    """Provider errors are retried a bounded number of times, then surface."""
-    error = APIConnectionError(request=httpx.Request("POST", "https://llm.example/v1"))
-    fake_openai = FakeOpenAI([error] * failures + [valid_process_step().model_dump_json()])
+    """Transient provider errors are retried a bounded number of times, others surface."""
+    fake_openai = FakeOpenAI([*errors, valid_process_step().model_dump_json()])
     real_sleep = asyncio.sleep
     monkeypatch.setattr(asyncio, "sleep", lambda _delay: real_sleep(0))
     client = OpenAIStructuredStepClient(
@@ -149,14 +182,15 @@ def test_structured_client_retries_provider_errors(
     trace = TaskTrace(tmp_path / "task.trace.jsonl")
     messages = [{"role": "system", "content": "Investigate."}]
 
-    if recovers:
+    if requests > len(errors):
         step = asyncio.run(client.next_step(messages, trace=trace))
         assert step.function.tool == "get_entity"
     else:
-        with pytest.raises(APIConnectionError):
+        with pytest.raises(type(errors[requests - 1])):
             asyncio.run(client.next_step(messages, trace=trace))
+    assert len(fake_openai.completions.requests) == requests
     events = [json.loads(line) for line in trace.path.read_text(encoding="utf-8").splitlines()]
-    assert [event["kind"] for event in events].count("llm_error") == min(failures, 3)
+    assert [event["kind"] for event in events].count("llm_error") == min(len(errors), requests)
 
 
 def test_response_schema_requires_nullable_tool_fields() -> None:

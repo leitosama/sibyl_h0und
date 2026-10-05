@@ -36,7 +36,6 @@ Investigation rules:
 - Use only entity_id values actually returned by the alert or by a tool.
 - Submit only response artifacts supported by evidence. Do not invent entity ids.
 - Keep current_state evidence-focused and the remaining plan short.
-- Set task_completed=true exactly when selecting finish_investigation.
 - Finish before the investigation step budget is exhausted.
 """.strip()
 
