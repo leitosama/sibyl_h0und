@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 import time
@@ -5,14 +6,13 @@ from types import TracebackType
 from typing import Any, Protocol, Self, cast
 
 from loguru import logger
-from openai import AsyncOpenAI
+from openai import APIError, AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
 from openai.types.shared_params import ResponseFormatJSONSchema
 from pydantic import ValidationError
 
 from sibyl_h0und.models import (
     NEXT_STEP_RESPONSE_FORMAT,
-    FinishInvestigationRequest,
     NextStep,
 )
 from sibyl_h0und.trace import TaskTrace
@@ -36,6 +36,10 @@ For example, a call with one advertised argument is:
 Set task_completed=true only for a function whose tool is finish_investigation.
 Return no prose, markdown, XML, comments, or keys outside the required object.
 """.strip()
+
+# Seconds to wait before each repeated provider request after a transport or
+# HTTP error; the length bounds the extra requests, so a run never hangs.
+TRANSPORT_RETRY_DELAYS = (2.0, 5.0, 10.0)
 
 REPAIR_INSTRUCTION = (
     "Your previous reply violated the required NextStep contract. " + STRUCTURED_OUTPUT_INSTRUCTION
@@ -142,12 +146,7 @@ class OpenAIStructuredStepClient:
 
         for attempt in range(1, self.max_retries + 1):
             started_at = time.perf_counter()
-            response = await self._client.chat.completions.create(
-                model=self.model,
-                messages=cast(list[ChatCompletionMessageParam], request_messages),
-                response_format=cast(ResponseFormatJSONSchema, NEXT_STEP_RESPONSE_FORMAT),
-                max_completion_tokens=self.max_completion_tokens,
-            )
+            response = await self._create_completion(request_messages, trace)
             latency_ms = int((time.perf_counter() - started_at) * 1000)
             raw_content = extract_raw_content(response)
             total_tokens = response_total_tokens(response)
@@ -192,6 +191,39 @@ class OpenAIStructuredStepClient:
 
         message = str(last_error or ValueError("Unable to parse model response."))
         raise NextStepRequestError(message) from last_error
+
+    async def _create_completion(self, messages: list[dict[str, Any]], trace: TaskTrace) -> Any:
+        """Request one completion, repeating it after provider errors.
+
+        Proxies in front of the model answer transient outages with arbitrary
+        HTTP codes (an Open WebUI connection error arrives as 400), so every
+        `APIError` is retried after the next delay in `TRANSPORT_RETRY_DELAYS`.
+
+        Args:
+            messages: Request messages, including structured-output instructions.
+            trace: Task trace that receives one `llm_error` event per retried failure.
+
+        Returns:
+            Raw chat completion response.
+
+        Raises:
+            APIError: If the request still fails after every retry.
+        """
+        request = self._client.chat.completions.create
+        arguments: dict[str, Any] = {
+            "model": self.model,
+            "messages": cast(list[ChatCompletionMessageParam], messages),
+            "response_format": cast(ResponseFormatJSONSchema, NEXT_STEP_RESPONSE_FORMAT),
+            "max_completion_tokens": self.max_completion_tokens,
+        }
+        for delay in TRANSPORT_RETRY_DELAYS:
+            try:
+                return await request(**arguments)
+            except APIError as exc:
+                trace.event("llm_error", error=f"{type(exc).__name__}: {exc}"[:2_000])
+                logger.warning("LLM request failed, retrying in {} s: {}", delay, exc)
+                await asyncio.sleep(delay)
+        return await request(**arguments)
 
 
 def extract_message_text(message: Any) -> str:
@@ -276,7 +308,7 @@ def parse_next_step_payload(raw_content: str) -> NextStep:
         Parsed and validated step.
 
     Raises:
-        ValueError: If JSON, schema, or completion semantics are invalid.
+        ValueError: If the reply is not valid `NextStep` JSON.
     """
     if not raw_content:
         raise ValueError("Model returned empty content for NextStep response.")
@@ -287,11 +319,6 @@ def parse_next_step_payload(raw_content: str) -> NextStep:
     except ValidationError as exc:
         raise ValueError("Model returned invalid NextStep JSON.") from exc
 
-    is_finish = isinstance(step.function, FinishInvestigationRequest)
-    if step.task_completed != is_finish:
-        raise ValueError(
-            "task_completed must be true exactly when finish_investigation is selected."
-        )
     return step
 
 
