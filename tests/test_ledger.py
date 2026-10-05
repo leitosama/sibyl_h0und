@@ -103,3 +103,41 @@ def test_finish_citing_unknown_id_or_property_is_rejected() -> None:
         assert ledger.check("finish_investigation", finish("proc-1", field)).feedback is None
     # Properties of an entity never fetched cannot be checked, so they pass.
     assert ledger.check("finish_investigation", finish("rel-3", "anything")).feedback is None
+
+
+def test_plain_fields_of_trigger_entities_are_not_ids() -> None:
+    """Only id keys of an alert entity become ids, not its other fields."""
+    ledger = GraphLedger()
+    ledger.observe_alert(
+        {"trigger_entities": [{"entity_id": "proc-1", "type": "windows_process", "tags": ["x"]}]}
+    )
+
+    assert ledger.unvisited_entities() == ["proc-1"]
+
+
+def test_response_without_the_object_records_no_properties() -> None:
+    """A call that takes an entity id but returns something else must not limit its fields."""
+    ledger = fetched_ledger()
+    other = {"entity_id": "proc-1", "score": 3}
+    ledger.record(
+        "score_entity",
+        {"entity_id": "proc-9-unseen", "reasoning": "x"},
+        other,
+        {"status": "ok", "result": other},
+        failed=False,
+    )
+
+    assert "proc-9-unseen" not in ledger.properties
+
+
+def test_alert_prose_names_ids_only_as_whole_words() -> None:
+    """A fragment of an id in the alert text is not a known id."""
+    ledger = GraphLedger()
+    ledger.observe_alert({"alert_text": "Process proc-12 wrote C:/tmp/a.exe. Then proc-77."})
+
+    assert ledger.is_known("proc-12")
+    assert ledger.is_known("proc-77")
+    assert ledger.is_known("C:/tmp/a.exe")
+    assert not ledger.is_known("proc-1")
+    assert not ledger.is_known("1")
+    assert not ledger.is_known("proc")

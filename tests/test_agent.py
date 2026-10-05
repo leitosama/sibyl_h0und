@@ -111,7 +111,9 @@ class FakeSession:
             )
         # The runtime repeats the alert and the catalog in every observation
         # and puts the new evidence only in `last_tool_result`.
-        result = {"id": "process-1", "pid": 42} if not terminal else "Report accepted"
+        result = (
+            {"id": arguments.get("entity_id"), "pid": 42} if not terminal else "Report accepted"
+        )
         return ToolCallResult(
             task_id="task-1",
             tool_name=tool_name,
@@ -182,7 +184,7 @@ def investigation_steps() -> list[NextStep]:
                     verdict="malicious",
                     ir_artifacts=[
                         FinishInvestigationArtifact(
-                            entity_id="process-1",
+                            entity_id="entity-1",
                             kind="host_to_isolate",
                         )
                     ],
@@ -220,7 +222,7 @@ def test_agent_executes_fresh_structured_task_via_remote_session(tmp_path: Path)
     assert session.calls[1][1] == {
         "submission": {
             "verdict": "malicious",
-            "ir_artifacts": [{"entity_id": "process-1", "kind": "host_to_isolate"}],
+            "ir_artifacts": [{"entity_id": "entity-1", "kind": "host_to_isolate"}],
             "reasoning": "The alert process is part of a suspicious process chain.",
         }
     }
@@ -228,7 +230,7 @@ def test_agent_executes_fresh_structured_task_via_remote_session(tmp_path: Path)
     assert tool_message["role"] == "tool"
     assert json.loads(tool_message["content"]) == {
         "status": "ok",
-        "result": {"id": "process-1", "pid": 42},
+        "result": {"id": "entity-1", "pid": 42},
     }
     request_text = json.dumps(llm.requests[1])
     assert request_text.count("CATALOG-MARKER") == 1
@@ -248,7 +250,7 @@ def test_agent_executes_fresh_structured_task_via_remote_session(tmp_path: Path)
     assert "available_tools" in events[0]["payload"]["task"]["observation"]
     assert events[2]["tool"] == "get_entity"
     assert json.loads(events[2]["payload"]["response"]["observation"]["last_tool_result"]) == {
-        "id": "process-1",
+        "id": "entity-1",
         "pid": 42,
     }
     assert events[-1]["completion_reason"] == "terminated"
@@ -322,7 +324,7 @@ def test_ledger_answers_invented_ids_and_repeats_without_the_runtime(tmp_path: P
     feedback = [json.loads(request[-1]["content"]) for request in llm.requests[1:]]
     assert feedback[0]["status"] == "error"
     assert "entity-invented" in feedback[0]["message"]
-    assert feedback[2]["result"] == {"id": "process-1", "pid": 42}
+    assert feedback[2]["result"] == {"id": "entity-1", "pid": 42}
     assert "note" in feedback[2]
     assert "entity-invented" in feedback[3]["message"]
     assert "digitial_signature" in feedback[4]["message"]

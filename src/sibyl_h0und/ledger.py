@@ -6,6 +6,7 @@ is handled the same way as the practice tools.
 """
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -17,6 +18,10 @@ ENTITY_LIST_KEYS = frozenset({"trigger_entities", "entities", "entity_ids"})
 RELATION_LIST_KEYS = frozenset({"trigger_relations", "relations", "relation_ids"})
 # Arguments that never change what a call returns.
 IGNORED_ARGUMENTS = frozenset({"reasoning"})
+# Characters that end an id inside the alert's prose.
+ID_BOUNDARY = r"\s\"'`,;()\[\]{}<>"
+# Shorter values are too likely to occur in prose by chance.
+MIN_PROSE_ID_LENGTH = 4
 # How many ids an error message or a summary lists before it only counts them.
 MAX_LISTED_IDS = 30
 
@@ -58,10 +63,8 @@ class GraphLedger:
         Args:
             alert: Decoded observation fields without the tool catalog.
         """
-        for value in alert.values():
-            if isinstance(value, str):
-                self.alert_text.append(value)
-            self._collect(value)
+        self.alert_text.extend(value for value in alert.values() if isinstance(value, str))
+        self._collect(alert)
 
     def check(self, tool_name: str, arguments: dict[str, Any]) -> LedgerDecision:
         """Decide whether a call must reach the runtime.
@@ -180,8 +183,17 @@ class GraphLedger:
             value in self.entities
             or value in self.relations
             or value in self.seen_values
-            or any(value in text for text in self.alert_text)
+            or self._in_alert_text(value)
         )
+
+    def _in_alert_text(self, value: str) -> bool:
+        """Tell whether the alert's prose names this id as a whole word."""
+        if len(value) < MIN_PROSE_ID_LENGTH:
+            return False
+        pattern = re.compile(
+            rf"(?<![^{ID_BOUNDARY}]){re.escape(value)}(?=[{ID_BOUNDARY}]|\.?(?:\s|$))"
+        )
+        return any(pattern.search(text) for text in self.alert_text)
 
     def _argument_problems(self, arguments: Any) -> list[str]:
         """Find unknown ids and unknown property fields anywhere in the arguments."""
@@ -225,9 +237,15 @@ class GraphLedger:
         return problems
 
     def _record_fetched(self, object_id: str, result: Any) -> None:
-        """Store the property keys of an object fetched by its id."""
-        keys = self.properties.setdefault(object_id, set())
-        _collect_keys(result, "", keys)
+        """Store the property keys of an object fetched by its id.
+
+        Only a response that carries the object itself, a dict whose `id` is
+        the requested id, describes its properties. Any other response says
+        nothing about them, and the finish check then skips this object.
+        """
+        described = _find_object(result, object_id)
+        if described is not None:
+            _collect_keys(described, "", self.properties.setdefault(object_id, set()))
 
     def _collect(self, node: Any, kind: str | None = None) -> None:
         """Walk a response and record every id it names.
@@ -258,7 +276,7 @@ class GraphLedger:
                 self._collect(value, "entity")
             elif key in RELATION_ID_KEYS or key in RELATION_LIST_KEYS:
                 self._collect(value, "relation")
-            elif kind is not None and not isinstance(object_id, str):
+            elif kind is not None and _is_id_container(node):
                 # A container such as `{"incoming": [...], "outgoing": [...]}`.
                 self._collect(value, kind)
             else:
@@ -284,6 +302,28 @@ def _object_kind(node: dict[str, Any]) -> str | None:
         return "relation"
     if "relation_ids" in node:
         return "entity"
+    return None
+
+
+def _is_id_container(node: dict[str, Any]) -> bool:
+    """Tell whether a dict only groups id lists, like `incoming` and `outgoing`."""
+    return "id" not in node and all(isinstance(value, list) for value in node.values())
+
+
+def _find_object(node: Any, object_id: str) -> dict[str, Any] | None:
+    """Return the first dict whose `id` is `object_id` anywhere in a JSON value."""
+    if isinstance(node, dict):
+        if node.get("id") == object_id:
+            return node
+        children = list(node.values())
+    elif isinstance(node, list):
+        children = node
+    else:
+        return None
+    for child in children:
+        found = _find_object(child, object_id)
+        if found is not None:
+            return found
     return None
 
 
