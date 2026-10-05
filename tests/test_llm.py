@@ -29,7 +29,7 @@ from sibyl_h0und.models import (
     NextStep,
     SearchRequest,
 )
-from sibyl_h0und.trace import TaskTrace
+from sibyl_h0und.trace import TaskTrace, llm_requests
 
 
 class FakeCompletions:
@@ -42,7 +42,7 @@ class FakeCompletions:
 
     async def create(self, **kwargs: Any) -> Any:
         """Return the next queued assistant message or raise the queued error."""
-        self.requests.append(kwargs)
+        self.requests.append({**kwargs, "messages": list(kwargs["messages"])})
         content = self.contents.pop(0)
         if isinstance(content, Exception):
             raise content
@@ -84,7 +84,8 @@ def valid_process_step() -> NextStep:
 
 def test_structured_client_repairs_malformed_response(tmp_path: Path) -> None:
     """Malformed provider output should be retried outside the main history and traced."""
-    fake_openai = FakeOpenAI(["not-json", valid_process_step().model_dump_json()])
+    valid = valid_process_step().model_dump_json()
+    fake_openai = FakeOpenAI(["not-json", valid, valid])
     client = OpenAIStructuredStepClient(
         base_url="https://llm.example/v1",
         api_key="secret",
@@ -107,11 +108,23 @@ def test_structured_client_repairs_malformed_response(tmp_path: Path) -> None:
     repaired_messages = fake_openai.completions.requests[1]["messages"]
     assert repaired_messages[-1]["role"] == "user"
     assert original_messages == [{"role": "system", "content": "Investigate."}]
+    # The next step drops the repair exchange, so its history diverges from the
+    # previous request after the system message.
+    next_messages = [
+        *original_messages,
+        {"role": "assistant", "content": "Read the trigger entity."},
+        {"role": "tool", "content": "{}", "tool_call_id": "step_1"},
+    ]
+    asyncio.run(client.next_step(next_messages, trace=trace))
+
     events = [json.loads(line) for line in trace.path.read_text(encoding="utf-8").splitlines()]
-    assert [event["attempt"] for event in events] == [1, 2]
+    assert [event["attempt"] for event in events] == [1, 2, 1]
     assert events[0]["payload"]["raw_content"] == "not-json"
-    assert events[1]["payload"]["messages"] == repaired_messages
-    assert (trace.llm_calls, trace.llm_tokens) == (2, 34)
+    assert llm_requests(events) == [
+        request["messages"] for request in fake_openai.completions.requests
+    ]
+    assert len(events[2]["payload"]["messages"]) == 2
+    assert (trace.llm_calls, trace.llm_tokens) == (3, 51)
 
 
 def test_parser_accepts_finish_with_stale_completion_flag() -> None:

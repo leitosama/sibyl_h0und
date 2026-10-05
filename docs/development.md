@@ -82,13 +82,21 @@ traces/
 | `kind` | Плоские поля | `payload` |
 | --- | --- | --- |
 | `task_start` | — | `run`: настройки run'а без секретов (модель, лимиты, арена); `task`: задача целиком, включая `observation` и `available_tools` |
-| `llm_call` | `attempt`, `tokens` | `messages` (ровно то, что ушло в LLM), `raw_content` (ответ модели как есть) |
+| `llm_call` | `attempt`, `tokens` | `prefix`, `messages`: новые сообщения запроса (см. ниже), `raw_content` (ответ модели как есть) |
 | `step` | `tool` | `step`: разобранный `NextStep` |
 | `tool_call` | `tool`, `status`, `reward`, `terminated`, `truncated` или `error` | `arguments`, `response`: полный `ToolCallResult` от runtime |
 | `tool_rejected` | `tool` | `arguments` вызова, отклонённого локально |
 | `task_end` | `completion_reason`, `total_reward`, `quality_score`, `efficiency_score`, `tool_calls`, `steps_taken`, `agent_steps`, `runtime_calls`, `llm_calls`, `llm_tokens`, `llm_ms`, `error` | `task_result` |
 
 Один `llm_call` пишется на каждую попытку, включая ремонт невалидного ответа.
+Запрос к LLM целиком не хранится: история растёт с каждым шагом, и полные
+копии раздували трейс квадратично. `prefix` — сколько первых сообщений
+запрос делит с предыдущим `llm_call` той же задачи, `messages` — сообщения
+после них. Полный запрос шага N — это первые `prefix` сообщений запроса
+N−1 плюс `messages`. Префикс может быть короче предыдущего запроса: после
+ремонта следующий шаг идёт без неудачного ответа и инструкции ремонта.
+Собирает полные запросы `sibyl_h0und.trace.llm_requests(events)`; в старых
+трейсах `prefix` нет, и `messages` там — полный запрос.
 Если агент упал, текст ошибки лежит в `error` у `task_end`. Ответы runtime
 сохраняются целиком, поэтому по трейсу задачу потом можно проиграть офлайн.
 Каждое событие дописывается в файл сразу, так что после падения остаётся всё,
@@ -106,7 +114,7 @@ traces/
 T=~/.local/share/sibyl_h0und/traces/<run>/001_<task_id>.trace.jsonl
 jq -r 'select(.kind=="step") | "\(.step) \(.tool): \(.payload.step.current_state)"' $T
 jq -c 'select(.kind=="tool_call") | {step, tool, status, duration_ms, args: .payload.arguments}' $T
-jq 'select(.kind=="llm_call" and .step==3) | .payload.messages' $T   # контекст LLM на шаге 3
+jq 'select(.kind=="llm_call" and .step==3) | .payload.messages' $T   # что добавилось в контекст LLM на шаге 3
 vd $T     # visidata: таблица событий, Enter проваливается в payload
 jless $T  # или fx: сворачиваемый JSON
 ```

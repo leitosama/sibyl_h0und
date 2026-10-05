@@ -162,12 +162,12 @@ class OpenAIStructuredStepClient:
             trace.llm_calls += 1
             trace.llm_tokens += total_tokens
             trace.llm_ms += latency_ms
-            trace.event(
-                "llm_call",
+            trace.llm_call(
+                request_messages,
+                raw_content=raw_content,
                 attempt=attempt,
                 tokens=total_tokens,
                 duration_ms=latency_ms,
-                payload={"messages": request_messages, "raw_content": raw_content},
             )
 
             try:

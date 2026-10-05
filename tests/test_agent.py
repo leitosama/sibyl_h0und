@@ -21,6 +21,14 @@ from sibyl_h0und.models import (
 )
 from sibyl_h0und.trace import TaskTrace
 
+# A catalog entry with a marker that shows where the catalog reaches the LLM.
+TOOL_CATALOG = json.dumps(
+    [
+        {"name": "get_entity", "description": "CATALOG-MARKER", "parameters": {"type": "object"}},
+        {"name": "finish_investigation", "parameters": {"type": "object"}},
+    ]
+)
+
 
 class FakeStepClient:
     """Deterministic structured steps used by the agent unit test."""
@@ -61,13 +69,9 @@ class FakeSession:
         self.task = PublicTask(
             task_id="task-1",
             observation={
-                "alert_text": {"trigger_entities": []},
-                "available_tools": json.dumps(
-                    [
-                        {"name": "get_entity", "parameters": {"type": "object"}},
-                        {"name": "finish_investigation", "parameters": {"type": "object"}},
-                    ]
-                ),
+                "last_tool_result": '""',
+                "available_tools": TOOL_CATALOG,
+                "alert_text": json.dumps({"trigger_entities": [{"id": "entity-1"}]}),
             },
         )
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -103,17 +107,16 @@ class FakeSession:
                 task_id="task-1",
                 completion_reason="terminated",
             )
+        # The runtime repeats the alert and the catalog in every observation
+        # and puts the new evidence only in `last_tool_result`.
+        result = {"id": "process-1", "pid": 42} if not terminal else "Report accepted"
         return ToolCallResult(
             task_id="task-1",
             tool_name=tool_name,
+            observation={**self.task.observation, "last_tool_result": json.dumps(result)},
             reward=1.0,
             terminated=terminal,
-            info={
-                "tool_status": "ok",
-                "tool_result": (
-                    [{"entity_id": "process-1", "pid": 42}] if not terminal else "Report accepted"
-                ),
-            },
+            info={"tool_status": "ok", "tool_name": tool_name},
             task_result=task_result,
         )
 
@@ -219,10 +222,15 @@ def test_agent_executes_fresh_structured_task_via_remote_session(tmp_path: Path)
             "reasoning": "The alert process is part of a suspicious process chain.",
         }
     }
-    assert any(
-        message.get("role") == "tool" and "process-1" in str(message.get("content"))
-        for message in llm.requests[1]
-    )
+    tool_message = llm.requests[1][-1]
+    assert tool_message["role"] == "tool"
+    assert json.loads(tool_message["content"]) == {
+        "status": "ok",
+        "result": {"id": "process-1", "pid": 42},
+    }
+    request_text = json.dumps(llm.requests[1])
+    assert request_text.count("CATALOG-MARKER") == 1
+    assert "entity-1" in str(llm.requests[0][1]["content"])
 
     (run_dir,) = tmp_path.iterdir()
     events = read_events(run_dir / "001_task-1.trace.jsonl")
@@ -237,7 +245,10 @@ def test_agent_executes_fresh_structured_task_via_remote_session(tmp_path: Path)
     assert events[0]["payload"]["run"] == {"model": "m-1"}
     assert "available_tools" in events[0]["payload"]["task"]["observation"]
     assert events[2]["tool"] == "get_entity"
-    assert events[2]["payload"]["response"]["info"]["tool_result"][0]["pid"] == 42
+    assert json.loads(events[2]["payload"]["response"]["observation"]["last_tool_result"]) == {
+        "id": "process-1",
+        "pid": 42,
+    }
     assert events[-1]["completion_reason"] == "terminated"
     assert events[-1]["runtime_calls"] == 2
 
