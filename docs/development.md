@@ -60,7 +60,7 @@ uv run pytest
 Каждый run пишет трейсы в каталог вне репозитория:
 `$TRACE_DIR` (по умолчанию `~/.local/share/sibyl_h0und/traces/`). Отключить
 запись можно через `TRACE_ENABLED=false`. Ошибка записи трейса не прерывает
-run: в лог попадает предупреждение, и трейс этой задачи дальше не пишется.
+run: в лог попадает предупреждение, событие пропускается.
 
 Трейсы **не хранятся в репозитории**: они раздувают контекст агентов и
 сессий разработки, а публиковать содержимое задач правила запрещают.
@@ -71,33 +71,28 @@ run: в лог попадает предупреждение, и трейс эт
 ```
 traces/
   20261005T120000Z_<run_id>/
-    run.json                      настройки run'а без секретов, git_revision
     001_<task_id>.trace.jsonl     одна задача, одно событие на строку
     002_<task_id>.trace.jsonl
 ```
 
-`git_revision` — короткий хэш коммита, суффикс `-dirty` означает
-незакоммиченные правки. По нему видно, какой версией промпта и кода сделан
-трейс.
-
 У каждой строки есть общие поля `ts`, `run_id`, `task_id`, `seq`, `step`,
-`kind`, иногда `duration_ms`. Рядом лежат короткие поля события, а сырые
+`kind`, у вызовов ещё `duration_ms`. Рядом лежат короткие поля события, а сырые
 данные — во вложенном `payload`.
 
 | `kind` | Плоские поля | `payload` |
 | --- | --- | --- |
-| `task_start` | — | `task`: задача целиком, включая `observation` и `available_tools` |
-| `llm_call` | `attempt`, `model`, `tokens`, `finish_reason`, `error` | `messages` (ровно то, что ушло в LLM), `raw_content`, `usage`, `response` |
+| `task_start` | — | `run`: настройки run'а без секретов (модель, лимиты, арена); `task`: задача целиком, включая `observation` и `available_tools` |
+| `llm_call` | `attempt`, `tokens` | `messages` (ровно то, что ушло в LLM), `raw_content` (ответ модели как есть) |
 | `step` | `tool` | `step`: разобранный `NextStep` |
 | `tool_call` | `tool`, `status`, `reward`, `terminated`, `truncated` или `error` | `arguments`, `response`: полный `ToolCallResult` от runtime |
 | `tool_rejected` | `tool` | `arguments` вызова, отклонённого локально |
-| `error` | `error` | — |
 | `task_end` | `completion_reason`, `total_reward`, `quality_score`, `efficiency_score`, `tool_calls`, `steps_taken`, `agent_steps`, `runtime_calls`, `llm_calls`, `llm_tokens`, `llm_ms`, `error` | `task_result` |
 
 Один `llm_call` пишется на каждую попытку, включая ремонт невалидного ответа.
-Ответы runtime сохраняются целиком, поэтому по трейсу задачу потом можно
-проиграть офлайн. Строки пишутся и сбрасываются на диск сразу, так что после
-падения остаётся всё, что было до него.
+Если агент упал, текст ошибки лежит в `error` у `task_end`. Ответы runtime
+сохраняются целиком, поэтому по трейсу задачу потом можно проиграть офлайн.
+Каждое событие дописывается в файл сразу, так что после падения остаётся всё,
+что было до него.
 
 ### Просмотр
 

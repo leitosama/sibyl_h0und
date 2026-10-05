@@ -13,7 +13,7 @@ from bluesec1_client import (
     ToolCallResult,
 )
 from sibyl_h0und.llm import StructuredStepClient, render_json
-from sibyl_h0und.trace import RunTrace, TaskTrace, elapsed_ms
+from sibyl_h0und.trace import TaskTrace, elapsed_ms, run_trace_dir, task_trace_path
 
 SYSTEM_PROMPT = """
 You are a pragmatic senior SOC analyst investigating one security alert.
@@ -69,7 +69,7 @@ class SimpleSGRAgent:
             llm: Structured step generator used for every investigation turn.
             max_steps: Maximum total tool calls allowed for one task.
             trace_dir: Root directory for run traces, or `None` to disable tracing.
-            trace_metadata: Non-secret run settings stored in the run's `run.json`.
+            trace_metadata: Non-secret run settings stored in every `task_start` event.
 
         Raises:
             ValueError: If the configured limit is not positive.
@@ -97,26 +97,30 @@ class SimpleSGRAgent:
         if remote_run is None:
             raise RuntimeError("RemoteBenchmarkClient must be open before running the agent.")
 
-        run_trace = RunTrace.open(
-            self.trace_dir, run_id=remote_run.run_id, metadata=self.trace_metadata
-        )
+        run_dir = None
+        if self.trace_dir is not None:
+            run_dir = run_trace_dir(self.trace_dir, remote_run.run_id)
+            logger.info("Writing traces to {}", run_dir)
         task_results: list[TaskResult] = []
         while (session := await client.start_task()) is not None:
             logger.info("Starting structured investigation for task {}.", session.task_id)
-            trace = run_trace.task(session.task_id)
+            trace_path = None
+            if run_dir is not None:
+                trace_path = task_trace_path(run_dir, len(task_results) + 1, session.task_id)
+            trace = TaskTrace(
+                trace_path,
+                run_id=remote_run.run_id,
+                task_id=session.task_id,
+            )
             error_message: str | None = None
             try:
-                try:
-                    task_result = await self._investigate(session, trace)
-                except Exception as exc:
-                    logger.error("Task {} failed in the agent: {}", session.task_id, exc)
-                    error_message = f"{type(exc).__name__}: {exc}"[:2_000]
-                    trace.event("error", error=error_message)
-                    aborted_result = await session.abort_task(error_message=error_message)
-                    task_result = TaskResult.model_validate(aborted_result)
-                self._trace_task_end(trace, task_result, error_message)
-            finally:
-                trace.close()
+                task_result = await self._investigate(session, trace)
+            except Exception as exc:
+                logger.error("Task {} failed in the agent: {}", session.task_id, exc)
+                error_message = f"{type(exc).__name__}: {exc}"[:2_000]
+                aborted_result = await session.abort_task(error_message=error_message)
+                task_result = TaskResult.model_validate(aborted_result)
+            self._trace_task_end(trace, task_result, error_message)
             task_results.append(task_result)
 
         successful_tasks = sum(
@@ -147,9 +151,12 @@ class SimpleSGRAgent:
             ValueError: If the task observation has an invalid tool catalog.
             RuntimeError: If the agent exhausts its step budget.
         """
-        trace = trace or TaskTrace.disabled(session.task_id)
+        trace = trace or TaskTrace(None)
         observation = session.task.observation
-        trace.event("task_start", payload={"task": session.task.model_dump(mode="json")})
+        trace.event(
+            "task_start",
+            payload={"run": self.trace_metadata, "task": session.task.model_dump(mode="json")},
+        )
         tool_specs = self._tool_specs(observation)
         available_tools = {
             specification["name"]
@@ -255,17 +262,7 @@ class SimpleSGRAgent:
         """
         trace.runtime_calls += 1
         started_at = time.perf_counter()
-        try:
-            response = await session.call_tool(tool_name, arguments)
-        except Exception as exc:
-            trace.event(
-                "tool_call",
-                duration_ms=elapsed_ms(started_at),
-                tool=tool_name,
-                error=f"{type(exc).__name__}: {exc}",
-                payload={"arguments": arguments},
-            )
-            raise
+        response = await session.call_tool(tool_name, arguments)
         trace.event(
             "tool_call",
             duration_ms=elapsed_ms(started_at),
