@@ -1,4 +1,6 @@
 import asyncio
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -19,6 +21,7 @@ from sibyl_h0und.models import (
     NextStep,
     SearchRequest,
 )
+from sibyl_h0und.trace import TaskTrace
 
 
 class FakeCompletions:
@@ -68,8 +71,8 @@ def valid_process_step() -> NextStep:
     )
 
 
-def test_structured_client_repairs_malformed_response() -> None:
-    """Malformed provider output should be retried outside the main history."""
+def test_structured_client_repairs_malformed_response(tmp_path: Path) -> None:
+    """Malformed provider output should be retried outside the main history and traced."""
     fake_openai = FakeOpenAI(["not-json", valid_process_step().model_dump_json()])
     client = OpenAIStructuredStepClient(
         base_url="https://llm.example/v1",
@@ -81,8 +84,9 @@ def test_structured_client_repairs_malformed_response() -> None:
         client=cast(AsyncOpenAI, fake_openai),
     )
     original_messages = [{"role": "system", "content": "Investigate."}]
+    trace = TaskTrace(tmp_path / "task.trace.jsonl")
 
-    step = asyncio.run(client.next_step(original_messages))
+    step = asyncio.run(client.next_step(original_messages, trace=trace))
 
     assert step.function.tool == "get_entity"
     assert len(fake_openai.completions.requests) == 2
@@ -92,6 +96,11 @@ def test_structured_client_repairs_malformed_response() -> None:
     repaired_messages = fake_openai.completions.requests[1]["messages"]
     assert repaired_messages[-1]["role"] == "user"
     assert original_messages == [{"role": "system", "content": "Investigate."}]
+    events = [json.loads(line) for line in trace.path.read_text(encoding="utf-8").splitlines()]
+    assert [event["attempt"] for event in events] == [1, 2]
+    assert events[0]["payload"]["raw_content"] == "not-json"
+    assert events[1]["payload"]["messages"] == repaired_messages
+    assert (trace.llm_calls, trace.llm_tokens) == (2, 34)
 
 
 def test_parser_rejects_inconsistent_completion_flag() -> None:

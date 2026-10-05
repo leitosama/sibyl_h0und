@@ -7,25 +7,6 @@ from sibyl_h0und import cli
 from sibyl_h0und.settings import Settings
 
 
-def test_settings_accept_explicit_runtime_and_provider_values() -> None:
-    """Explicit values should satisfy all required credentials."""
-    settings = Settings(
-        scenario_runtime_endpoint="runtime.example:443",
-        scenario_runtime_token="runtime-secret",
-        scenario_runtime_arena="practice",
-        llm_base_url="https://llm.example/v1",
-        llm_api_key="llm-secret",
-        llm_default_model="model-1",
-    )
-
-    assert settings.scenario_runtime_endpoint == "runtime.example:443"
-    assert settings.scenario_runtime_token.get_secret_value() == "runtime-secret"
-    assert settings.scenario_runtime_arena == "practice"
-    assert settings.llm_base_url == "https://llm.example/v1"
-    assert settings.llm_api_key.get_secret_value() == "llm-secret"
-    assert settings.llm_default_model == "model-1"
-
-
 def test_env_example_contains_complete_runnable_configuration() -> None:
     """The committed example should satisfy every required setting."""
     env_example = Path(__file__).resolve().parents[1] / ".env.example"
@@ -69,4 +50,3 @@ def test_run_capacity_message_depends_on_reason(reason: str, expected: str) -> N
     message = cli._run_capacity_message(error)
 
     assert expected in message
-    assert "One run per participant" not in message

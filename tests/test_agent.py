@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -153,44 +154,52 @@ class FakeClient:
         return cast(RemoteBenchmarkSession, session)
 
 
-def test_agent_executes_fresh_structured_task_via_remote_session() -> None:
-    """Tool evidence should feed the next step before the terminal action."""
-    llm = FakeStepClient(
-        [
-            NextStep(
-                current_state="Alert identifies process 42 on host-1.",
-                plan_remaining_steps_brief=["Inspect its process ancestry and descendants."],
-                task_completed=False,
-                function=GetEntityRequest(
-                    tool="get_entity",
-                    entity_id="entity-1",
-                    reasoning="Inspect the alert entity.",
+def investigation_steps() -> list[NextStep]:
+    """Build one evidence step followed by the terminal verdict."""
+    return [
+        NextStep(
+            current_state="Alert identifies process 42 on host-1.",
+            plan_remaining_steps_brief=["Inspect its process ancestry and descendants."],
+            task_completed=False,
+            function=GetEntityRequest(
+                tool="get_entity",
+                entity_id="entity-1",
+                reasoning="Inspect the alert entity.",
+            ),
+        ),
+        NextStep(
+            current_state="The suspicious process is confirmed on host-1.",
+            plan_remaining_steps_brief=["Submit the evidence-backed malicious verdict."],
+            task_completed=True,
+            function=FinishInvestigationRequest(
+                tool="finish_investigation",
+                submission=MaliciousFinishInvestigationSubmission(
+                    verdict="malicious",
+                    ir_artifacts=[
+                        FinishInvestigationArtifact(
+                            entity_id="host-1",
+                            kind="host_to_isolate",
+                        )
+                    ],
+                    reasoning="The alert process is part of a suspicious process chain.",
                 ),
             ),
-            NextStep(
-                current_state="The suspicious process is confirmed on host-1.",
-                plan_remaining_steps_brief=["Submit the evidence-backed malicious verdict."],
-                task_completed=True,
-                function=FinishInvestigationRequest(
-                    tool="finish_investigation",
-                    submission=MaliciousFinishInvestigationSubmission(
-                        verdict="malicious",
-                        ir_artifacts=[
-                            FinishInvestigationArtifact(
-                                entity_id="host-1",
-                                kind="host_to_isolate",
-                            )
-                        ],
-                        reasoning="The alert process is part of a suspicious process chain.",
-                    ),
-                ),
-            ),
-        ]
-    )
-    session = FakeSession()
-    client = FakeClient(session)
+        ),
+    ]
 
-    result = asyncio.run(SimpleSGRAgent(llm).run(cast(RemoteBenchmarkClient, client)))
+
+def read_events(path: Path) -> list[dict[str, Any]]:
+    """Parse every line of a JSONL trace."""
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_agent_executes_fresh_structured_task_via_remote_session(tmp_path: Path) -> None:
+    """Tool evidence should feed the next step, and the task should leave a trace."""
+    llm = FakeStepClient(investigation_steps())
+    session = FakeSession()
+    agent = SimpleSGRAgent(llm, trace_dir=tmp_path, trace_metadata={"model": "m-1"})
+
+    result = asyncio.run(agent.run(cast(RemoteBenchmarkClient, FakeClient(session))))
 
     assert result.run_id == "run-1"
     assert result.successful_tasks == 1
@@ -214,3 +223,31 @@ def test_agent_executes_fresh_structured_task_via_remote_session() -> None:
         message.get("role") == "tool" and "process-1" in str(message.get("content"))
         for message in llm.requests[1]
     )
+
+    (run_dir,) = tmp_path.iterdir()
+    events = read_events(run_dir / "001_task-1.trace.jsonl")
+    assert [event["kind"] for event in events] == [
+        "task_start",
+        "step",
+        "tool_call",
+        "step",
+        "tool_call",
+        "task_end",
+    ]
+    assert events[0]["payload"]["run"] == {"model": "m-1"}
+    assert "available_tools" in events[0]["payload"]["task"]["observation"]
+    assert events[2]["tool"] == "get_entity"
+    assert events[2]["payload"]["response"]["info"]["tool_result"][0]["pid"] == 42
+    assert events[-1]["completion_reason"] == "terminated"
+    assert events[-1]["runtime_calls"] == 2
+
+
+def test_trace_write_failure_does_not_break_the_run(tmp_path: Path) -> None:
+    """An unwritable trace root must not stop an arena run."""
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("", encoding="utf-8")
+    agent = SimpleSGRAgent(FakeStepClient(investigation_steps()), trace_dir=blocker)
+
+    result = asyncio.run(agent.run(cast(RemoteBenchmarkClient, FakeClient(FakeSession()))))
+
+    assert result.successful_tasks == 1
