@@ -13,7 +13,9 @@ from bluesec1_client import (
 )
 from sibyl_h0und.agent import SimpleSGRAgent
 from sibyl_h0und.models import (
+    BenignFinishInvestigationSubmission,
     FinishInvestigationArtifact,
+    FinishInvestigationEntityEvidence,
     FinishInvestigationRequest,
     GetEntityRequest,
     MaliciousFinishInvestigationSubmission,
@@ -180,7 +182,7 @@ def investigation_steps() -> list[NextStep]:
                     verdict="malicious",
                     ir_artifacts=[
                         FinishInvestigationArtifact(
-                            entity_id="host-1",
+                            entity_id="process-1",
                             kind="host_to_isolate",
                         )
                     ],
@@ -218,7 +220,7 @@ def test_agent_executes_fresh_structured_task_via_remote_session(tmp_path: Path)
     assert session.calls[1][1] == {
         "submission": {
             "verdict": "malicious",
-            "ir_artifacts": [{"entity_id": "host-1", "kind": "host_to_isolate"}],
+            "ir_artifacts": [{"entity_id": "process-1", "kind": "host_to_isolate"}],
             "reasoning": "The alert process is part of a suspicious process chain.",
         }
     }
@@ -262,3 +264,77 @@ def test_trace_write_failure_does_not_break_the_run(tmp_path: Path) -> None:
     result = asyncio.run(agent.run(cast(RemoteBenchmarkClient, FakeClient(FakeSession()))))
 
     assert result.successful_tasks == 1
+
+
+def get_entity_step(entity_id: str, reasoning: str = "Inspect the entity.") -> NextStep:
+    """Build a step that reads one entity."""
+    return NextStep(
+        current_state="Reading the graph.",
+        plan_remaining_steps_brief=["Read the entity."],
+        task_completed=False,
+        function=GetEntityRequest(tool="get_entity", entity_id=entity_id, reasoning=reasoning),
+    )
+
+
+def benign_finish_step(entity_id: str, field: str) -> NextStep:
+    """Build a benign verdict that cites one entity property."""
+    return NextStep(
+        current_state="The activity is legitimate.",
+        plan_remaining_steps_brief=["Submit the benign verdict."],
+        task_completed=True,
+        function=FinishInvestigationRequest(
+            tool="finish_investigation",
+            submission=BenignFinishInvestigationSubmission(
+                verdict="benign",
+                legitimacy_evidence=[
+                    FinishInvestigationEntityEvidence(
+                        anchor="entity", entity_id=entity_id, property_fields=[field]
+                    )
+                ],
+                reasoning="Signed vendor binary.",
+            ),
+        ),
+    )
+
+
+def test_ledger_answers_invented_ids_and_repeats_without_the_runtime(tmp_path: Path) -> None:
+    """Invented ids, repeated calls and an invalid finish must not cost runtime calls."""
+    llm = FakeStepClient(
+        [
+            get_entity_step("entity-invented"),
+            get_entity_step("entity-1"),
+            get_entity_step("entity-1", reasoning="Look again."),
+            benign_finish_step("entity-invented", "pid"),
+            benign_finish_step("entity-1", "digitial_signature"),
+            benign_finish_step("entity-1", "pid"),
+        ]
+    )
+    session = FakeSession()
+    agent = SimpleSGRAgent(llm, trace_dir=tmp_path)
+
+    result = asyncio.run(agent.run(cast(RemoteBenchmarkClient, FakeClient(session))))
+
+    assert result.successful_tasks == 1
+    assert [(name, arguments.get("entity_id")) for name, arguments in session.calls] == [
+        ("get_entity", "entity-1"),
+        ("finish_investigation", None),
+    ]
+    feedback = [json.loads(request[-1]["content"]) for request in llm.requests[1:]]
+    assert feedback[0]["status"] == "error"
+    assert "entity-invented" in feedback[0]["message"]
+    assert feedback[2]["result"] == {"id": "process-1", "pid": 42}
+    assert "note" in feedback[2]
+    assert "entity-invented" in feedback[3]["message"]
+    assert "digitial_signature" in feedback[4]["message"]
+
+    (run_dir,) = tmp_path.iterdir()
+    events = read_events(run_dir / "001_task-1.trace.jsonl")
+    assert [event["kind"] for event in events if event["kind"].startswith("tool_")] == [
+        "tool_rejected",
+        "tool_call",
+        "tool_cached",
+        "tool_rejected",
+        "tool_rejected",
+        "tool_call",
+    ]
+    assert events[-1]["runtime_calls"] == 2

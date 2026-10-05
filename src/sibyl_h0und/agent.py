@@ -12,6 +12,7 @@ from bluesec1_client import (
     TaskResult,
     ToolCallResult,
 )
+from sibyl_h0und.ledger import GraphLedger
 from sibyl_h0und.llm import StructuredStepClient, render_json
 from sibyl_h0und.trace import TaskTrace, elapsed_ms, run_trace_dir, task_trace_path
 
@@ -33,6 +34,9 @@ Investigation rules:
   you where to go next.
 - Search when you have a concrete string worth looking for and no edge leading to it.
 - Do not repeat an identical unhelpful or failed call.
+- Tool feedback may carry `still_open`: relations of visited entities and entities
+  you know of but have not opened yet. Calls with an id the runtime never returned
+  and repeated calls are answered locally and do not reach the runtime.
 - Use only entity_id values actually returned by the alert or by a tool.
 - Submit only response artifacts supported by evidence. Do not invent entity ids.
 - Keep current_state evidence-focused and the remaining plan short.
@@ -165,6 +169,13 @@ class SimpleSGRAgent:
         if "finish_investigation" not in available_tools:
             raise ValueError("The runtime did not advertise finish_investigation.")
 
+        initial_observation = {
+            key: _decode_json(value)
+            for key, value in observation.items()
+            if key not in {"available_tools", "last_tool_result"}
+        }
+        ledger = GraphLedger()
+        ledger.observe_alert(initial_observation)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
@@ -172,11 +183,7 @@ class SimpleSGRAgent:
                 "content": render_json(
                     {
                         "instruction": "Investigate this alert and submit the correct response.",
-                        "initial_observation": {
-                            key: _decode_json(value)
-                            for key, value in observation.items()
-                            if key not in {"available_tools", "last_tool_result"}
-                        },
+                        "initial_observation": initial_observation,
                         "available_tools": tool_specs,
                     }
                 ),
@@ -222,6 +229,14 @@ class SimpleSGRAgent:
                 }
                 logger.warning("Rejected unavailable tool {} locally.", tool_name)
                 trace.event("tool_rejected", tool=tool_name, payload={"arguments": arguments})
+            elif (decision := ledger.check(tool_name, arguments)).feedback is not None:
+                feedback = decision.feedback
+                logger.warning("Answered {} locally: {}.", tool_name, decision.reason)
+                trace.event(
+                    f"tool_{decision.reason}",
+                    tool=tool_name,
+                    payload={"arguments": arguments, "feedback": feedback},
+                )
             else:
                 response = await self._call_tool(session, trace, tool_name, arguments)
                 feedback = self._tool_feedback(response)
@@ -232,6 +247,15 @@ class SimpleSGRAgent:
                 )
                 if response.task_result is not None:
                     return TaskResult.model_validate(response.task_result)
+                ledger.record(
+                    tool_name,
+                    arguments,
+                    feedback["result"],
+                    feedback,
+                    failed=response.info.get("error") is not None,
+                )
+                if open_items := ledger.summary():
+                    feedback = {**feedback, "still_open": open_items}
 
             messages.append(
                 {
