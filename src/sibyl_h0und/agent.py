@@ -1,5 +1,6 @@
 import json
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -12,8 +13,10 @@ from bluesec1_client import (
     TaskResult,
     ToolCallResult,
 )
+from sibyl_h0und.flags import LOW, FlagBoard
 from sibyl_h0und.ledger import GraphLedger
 from sibyl_h0und.llm import StructuredStepClient, render_json
+from sibyl_h0und.rules import DEFAULT_RULES
 from sibyl_h0und.trace import TaskTrace, elapsed_ms, run_trace_dir, task_trace_path
 
 SYSTEM_PROMPT = """
@@ -176,6 +179,7 @@ class SimpleSGRAgent:
         }
         ledger = GraphLedger()
         ledger.observe_alert(initial_observation)
+        flag_board = FlagBoard(DEFAULT_RULES)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
@@ -256,6 +260,16 @@ class SimpleSGRAgent:
                 )
                 if open_items := ledger.summary():
                     feedback = {**feedback, "still_open": open_items}
+                if not feedback.get("error"):
+                    fresh = flag_board.observe(feedback["result"])
+                    if fresh:
+                        trace.event(
+                            "flags",
+                            tool=tool_name,
+                            payload={"findings": [asdict(finding) for finding in fresh]},
+                        )
+                    if shown := [item.as_feedback() for item in fresh if item.level != LOW]:
+                        feedback = {**feedback, "flags": shown}
 
             messages.append(
                 {

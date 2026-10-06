@@ -111,9 +111,7 @@ class FakeSession:
             )
         # The runtime repeats the alert and the catalog in every observation
         # and puts the new evidence only in `last_tool_result`.
-        result = (
-            {"id": arguments.get("entity_id"), "pid": 42} if not terminal else "Report accepted"
-        )
+        result = self.entity_result(arguments) if not terminal else "Report accepted"
         return ToolCallResult(
             task_id="task-1",
             tool_name=tool_name,
@@ -123,6 +121,11 @@ class FakeSession:
             info={"tool_status": "ok", "tool_name": tool_name},
             task_result=task_result,
         )
+
+    @staticmethod
+    def entity_result(arguments: dict[str, Any]) -> dict[str, Any]:
+        """Return the entity a `get_entity` call asked for."""
+        return {"id": arguments.get("entity_id"), "pid": 42}
 
     async def abort_task(self, *, error_message: str | None = None) -> TaskResult:
         """Reject unexpected aborts.
@@ -340,3 +343,38 @@ def test_ledger_answers_invented_ids_and_repeats_without_the_runtime(tmp_path: P
         "tool_call",
     ]
     assert events[-1]["runtime_calls"] == 2
+
+
+class DroppedFileSession(FakeSession):
+    """Session whose only entity is a script dropped into a public directory."""
+
+    @staticmethod
+    def entity_result(arguments: dict[str, Any]) -> dict[str, Any]:
+        """Return a high-scoring file entity."""
+        return {
+            "id": arguments["entity_id"],
+            "type": "windows_file",
+            "properties": {"path": "C:\\Windows\\System32\\run.ps1"},
+        }
+
+
+def test_flags_reach_the_model_and_the_trace(tmp_path: Path) -> None:
+    """A finding is shown once with the evidence it explains and is traced."""
+    llm = FakeStepClient([get_entity_step("entity-1"), investigation_steps()[1]])
+    agent = SimpleSGRAgent(llm, trace_dir=tmp_path)
+
+    asyncio.run(agent.run(cast(RemoteBenchmarkClient, FakeClient(DroppedFileSession()))))
+
+    feedback = json.loads(llm.requests[1][-1]["content"])
+    assert feedback["flags"] == [
+        {
+            "id": "entity-1",
+            "type": "windows_file",
+            "level": "high",
+            "why": "location=2 form=2 (score 4 of 4)",
+        }
+    ]
+    (run_dir,) = tmp_path.iterdir()
+    events = read_events(run_dir / "001_task-1.trace.jsonl")
+    (flags_event,) = [event for event in events if event["kind"] == "flags"]
+    assert flags_event["payload"]["findings"][0]["rule"] == "nextron_file"
