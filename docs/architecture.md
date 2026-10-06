@@ -27,8 +27,7 @@
 proto/                         gRPC-схема runtime (от организаторов)
 scripts/generate_remote_proto.py  перегенерация src/bluesec1_client/proto/
 scripts/build_*_pack.py        сборка пакетов знаний из upstream-источников
-scripts/replay_flags.py        проигрывание трейсов через правила флагов
-scripts/score_cited.py         оценки Nextron для объектов, названных в отчётах
+scripts/replay_knowledge.py    какие источники знают сущности из сохранённых трейсов
 src/bluesec1_client/           клиент runtime — копия от организаторов, НЕ ПРАВИМ
 src/sibyl_h0und/
   cli.py                       точка входа h0und: настройки, run, печать итогов
@@ -41,15 +40,12 @@ src/sibyl_h0und/
   budget.py                    CallBudget: страховочный лимит вызовов runtime, режим «только отчёт»
   models.py                    оболочка шага (NextStep, ToolCall), схемы аргументов practice
   ledger.py                    GraphLedger: известные id, кэш вызовов, проверка finish
-  flags.py                     флаги: Finding, LevelRule, ScoreRule, LookupRule, FlagBoard,
-                               NodeContext, лимит флагов на ответ
-  rules.py                     набор правил по умолчанию
-  nextron.py                   таблицы Location / User Context / Form из шпаргалки Nextron
-  lolbas.py                    правило по пакету LOLBAS
+  vocabulary.py                словарь знаний и инструмент lookup_knowledge (ADR 0017)
+  nextron.py                   строки шпаргалки Nextron: Location / User Context / Form
   normalize.py                 общая нормализация: имя программы, командная строка, путь, домен
   knowledge/                   пакеты знаний: JSON-снимки внешних источников и NOTICE
   trace.py                     JSONL-трейсы вне репозитория: запись и чтение событий
-  replay.py                    офлайн-проигрывание трейсов через флаги
+  replay.py                    офлайн-покрытие словаря по сохранённым трейсам
 tests/                         тесты без сети
 ```
 
@@ -58,7 +54,7 @@ tests/                         тесты без сети
 из `available_tools` задачи. `Investigation.before_call` проверяет вызов по каталогу задачи и в
 GraphLedger, в runtime уходит только то, что нельзя ответить локально, а
 `after_call` собирает ответ для модели: `last_tool_result` вместе с
-`still_open` и `flags`. Задача заканчивается, когда `finish_investigation`
+`still_open`. Вызов `lookup_knowledge` отвечает локально из пакетов знаний. Задача заканчивается, когда `finish_investigation`
 возвращает `task_result`.
 
 ## Правила
@@ -74,8 +70,7 @@ GraphLedger, в runtime уходит только то, что нельзя от
 | Модель получает алерт и каталог один раз, дальше только новые улики | [0007](adr/0007-compact-llm-context.md) |
 | JSONL-трейсы пишем вне репозитория, старые трейсы должны читаться | [0008](adr/0008-traces-outside-repo.md) |
 | Run на арене не ждёт ни человека, ни провайдера; повторяем только временные ошибки LLM | [0009](adr/0009-run-never-stalls.md) |
-| Флаги детерминированные и совещательные, правила меняем после `replay_flags.py --compare` | [0010](adr/0010-advisory-flags.md) |
-| Шпаргалка Nextron ранжирует подозрительное, но не находит его | [0011](adr/0011-nextron-as-ti.md) |
+| Знания — словарь, который модель читает через `lookup_knowledge`; правил-детекторов и уровней нет | [0017](adr/0017-knowledge-as-vocabulary.md) |
 | Знания — закоммиченные JSON-снимки, агент и CI в сеть не ходят | [0012](adr/0012-knowledge-packs.md) |
 | В отчёт попадает только то, что относится к инциденту | [0013](adr/0013-minimal-report.md) |
 

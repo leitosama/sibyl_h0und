@@ -10,11 +10,12 @@ A pack file holds:
 - `name`: pack name, also the source name shown in replay tables;
 - `source`, `url`, `version`, `retrieved`, `licence`: provenance;
 - `key`: normalizer of the entry keys, one of `normalize.KEY_NORMALIZERS`;
-- `entries`: map from a normalized key to the entry.
+- `entries`: map from a normalized key to the entry;
+- `documents` (optional): entries that have no key but are found by words.
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,7 @@ class Pack:
         licence: SPDX id of the upstream licence.
         key: Name of the key normalizer.
         entries: Entries by normalized key.
+        documents: Entries without a key, which a word search finds.
     """
 
     name: str
@@ -55,6 +57,7 @@ class Pack:
     licence: str
     key: str
     entries: dict[str, Any]
+    documents: list[Any] = field(default_factory=list)
 
     def normalize(self, value: Any) -> str | None:
         """Reduce a raw value to this pack's key form."""
@@ -81,7 +84,11 @@ def parse_pack(data: Any) -> Pack:
         raise PackError(f"Unknown key normalizer {data['key']!r}.")
     if not isinstance(data.get("entries"), dict):
         raise PackError("Pack field 'entries' must be an object.")
-    return Pack(**{name: data[name] for name in Pack.__dataclass_fields__})
+    documents = data.get("documents", [])
+    if not isinstance(documents, list):
+        raise PackError("Pack field 'documents' must be a list.")
+    required = {name: data[name] for name in Pack.__dataclass_fields__ if name != "documents"}
+    return Pack(**required, documents=documents)
 
 
 def read_pack(path: Path, *, budget: int = SIZE_BUDGET) -> Pack:

@@ -7,3 +7,43 @@ lolbas.json
   Licence: GNU General Public License v3.0
   Use: binary names, the categories of their documented commands and MITRE
   ATT&CK technique ids, reduced by scripts/build_lolbas_pack.py.
+
+attack_techniques.json, attack_software.json, attack_software_names.json
+  Source: MITRE ATT&CK(R) Enterprise, techniques and software (tools and malware),
+  https://attack.mitre.org/
+  Data: https://github.com/mitre-attack/attack-stix-data
+  Licence: MITRE ATT&CK Terms of Use, https://attack.mitre.org/resources/terms-of-use/
+  Notice: (c) 2015-2026 The MITRE Corporation. This work is reproduced and
+  distributed with the permission of The MITRE Corporation.
+  Use: ids, names, tactics, platforms, the opening of each description, software
+  names and aliases, and the technique ids each software uses, reduced by
+  scripts/build_attack_pack.py.
+
+lolrmm.json, lolrmm_domains.json
+  Source: LOLRMM, https://lolrmm.io/
+  Repository: https://github.com/magicsword-io/LOLRMM
+  Licence: Apache License 2.0
+  Use: executable names and domains of remote monitoring and management tools,
+  reduced by scripts/build_lolrmm_pack.py.
+
+wtfbins.json
+  Source: WTFBins, https://wtfbins.wtf/
+  Repository: https://github.com/mttaggart/wtfbins
+  Licence: MIT License
+  Use: titles, tags, the opening of each entry and its URL, reduced by
+  scripts/build_wtfbins_pack.py.
+
+gtfobins.json
+  Source: GTFOBins, https://gtfobins.org/
+  Repository: https://github.com/GTFOBins/GTFOBins.github.io
+  Licence: GNU General Public License v3.0
+  Use: executable names, the abuse functions with one example each, the
+  contexts they work in, and the function descriptions and MITRE ids, reduced
+  by scripts/build_gtfobins_pack.py.
+
+gtfoargs.json
+  Source: GTFOArgs, https://gtfoargs.github.io/
+  Repository: https://github.com/gtfoargs/gtfoargs.github.io
+  Licence: GNU General Public License v3.0
+  Use: program names, abuse functions and one example argument line each,
+  reduced by scripts/build_gtfoargs_pack.py.

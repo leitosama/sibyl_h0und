@@ -88,8 +88,8 @@ def test_invalid_arguments_and_invented_ids_are_answered_locally() -> None:
     assert "file-404" in invented.feedback["message"]
 
 
-def test_evidence_comes_with_flags_and_open_ids_and_a_repeat_gets_only_the_evidence() -> None:
-    """Flags and still_open are delivered once; the cached reply repeats the evidence."""
+def test_evidence_comes_with_open_ids_and_a_repeat_gets_only_the_evidence() -> None:
+    """still_open is delivered once; the cached reply repeats the evidence."""
     investigation = Investigation(observation())
     sent = investigation.before_call("get_entity", get_entity())
     assert isinstance(sent, Send)
@@ -98,17 +98,14 @@ def test_evidence_comes_with_flags_and_open_ids_and_a_repeat_gets_only_the_evide
     repeat = investigation.before_call("get_entity", get_entity())
 
     assert reply.feedback["result"] == DROPPED_FILE
-    assert reply.feedback["flags"]
-    assert [finding.node_id for finding in reply.shown] == ["file-1"]
     assert isinstance(repeat, LocalAnswer)
     assert repeat.feedback["result"] == DROPPED_FILE
-    assert "flags" not in repeat.feedback
     assert "still_open" not in repeat.feedback
     assert "note" in repeat.feedback
 
 
-def test_a_runtime_error_is_not_judged_and_teaches_nothing() -> None:
-    """An error response carries no flags, even if it echoes a node."""
+def test_a_runtime_error_teaches_nothing() -> None:
+    """An error response is not learned from, even if it echoes a node."""
     investigation = Investigation(observation())
 
     reply = investigation.after_call(
@@ -116,10 +113,45 @@ def test_a_runtime_error_is_not_judged_and_teaches_nothing() -> None:
     )
 
     assert reply.feedback["error"] == "boom"
-    assert "flags" not in reply.feedback
-    assert reply.shown == ()
-    assert investigation.findings == []
     assert isinstance(investigation.before_call("get_entity", get_entity("file-9")), LocalAnswer)
+
+
+def test_the_knowledge_tool_is_offered_and_answered_locally_whatever_the_ledger_knows() -> None:
+    """A lookup needs no known id, can repeat, and is answered by the vocabulary."""
+    investigation = Investigation(observation())
+
+    first = investigation.before_call("lookup_knowledge", {"query": "T1036.003"})
+    again = investigation.before_call("lookup_knowledge", {"query": "T1036.003"})
+
+    assert "lookup_knowledge" in [spec["name"] for spec in investigation.catalog.specs]
+    assert isinstance(first, LocalAnswer)
+    assert first.feedback["matches"][0]["id"] == "T1036.003"
+    assert again == first
+
+
+def test_a_knowledge_lookup_without_a_query_is_refused_locally_not_crashed() -> None:
+    """The model's malformed lookup gets an error message instead of breaking the task."""
+    answer = Investigation(observation()).before_call("lookup_knowledge", {})
+
+    assert isinstance(answer, LocalAnswer)
+    assert "Not sent to the runtime" in answer.feedback["message"]
+
+
+def test_a_runtime_tool_of_the_same_name_wins_over_the_local_one() -> None:
+    """The runtime's catalog is authoritative (ADR 0003): its tool is sent to the runtime."""
+    runtime_tool = {
+        "name": "lookup_knowledge",
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+    }
+    investigation = Investigation(observation([*CATALOG, runtime_tool]))
+
+    decision = investigation.before_call("lookup_knowledge", {"query": "x"})
+
+    assert isinstance(decision, Send)
 
 
 def test_local_decisions_are_traced(tmp_path: Path) -> None:
@@ -133,6 +165,8 @@ def test_local_decisions_are_traced(tmp_path: Path) -> None:
     investigation.after_call("get_entity", sent.arguments, ToolOutcome("ok", DROPPED_FILE))
     investigation.before_call("get_entity", get_entity())
 
+    investigation.before_call("lookup_knowledge", {"query": "x"})
+
     kinds = [json.loads(line)["kind"] for line in path.read_text().splitlines()]
 
-    assert kinds == ["tool_rejected", "tool_invalid", "flags", "tool_cached"]
+    assert kinds == ["tool_rejected", "tool_invalid", "tool_cached", "tool_knowledge"]

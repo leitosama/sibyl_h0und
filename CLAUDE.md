@@ -43,14 +43,17 @@ Each rule points to the ADR that explains it.
 - A run against an arena must never wait for a human; interactive debug
   modes work only offline. Retry only transient LLM errors, with bounded
   delays. (ADR 0009)
-- Flags are deterministic and advisory: no model, network, clock or extra
-  runtime calls, every rule names its source, and the model decides the
-  verdict. (ADR 0010, 0011)
+- Knowledge is a vocabulary the model consults through `lookup_knowledge`,
+  not detector rules: code retrieves entries as the source states them and
+  adds no level, score, threshold or trigger on specific properties. The
+  model decides what is suspicious. Lookups are local and cost no runtime
+  call. (ADR 0017)
 - Knowledge comes from committed JSON packs built by
   `scripts/build_<name>_pack.py`, with provenance; agents and CI never
-  fetch it at run time. Merge a rule
-  change or a new source only after `scripts/replay_flags.py --compare`
-  against `main`. (ADR 0010, 0012)
+  fetch it at run time. A new source needs a `NOTICE` entry, lookup tests, and
+  `scripts/replay_knowledge.py --compare` against a baseline saved on `main`
+  (what the source adds, and that it adds no entries where it should not).
+  (ADR 0012, 0017)
 - Never commit `.env*` (except `.env.example`), task dumps or traces. Traces
   live outside the repository. Keep at most 1–2 anonymized tasks in
   `tests/fixtures/`. (ADR 0002, 0008)
