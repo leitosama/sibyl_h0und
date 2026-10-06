@@ -20,10 +20,7 @@ from openai.types.chat import ChatCompletionMessageParam
 from openai.types.shared_params import ResponseFormatJSONSchema
 from pydantic import ValidationError
 
-from sibyl_h0und.models import (
-    NEXT_STEP_RESPONSE_FORMAT,
-    NextStep,
-)
+from sibyl_h0und.models import NextStep
 from sibyl_h0und.trace import TaskTrace
 
 STRUCTURED_OUTPUT_INSTRUCTION = """
@@ -65,9 +62,13 @@ class StructuredStepClient(Protocol):
     """Narrow async contract consumed by the investigation loop."""
 
     async def next_step(
-        self, messages: list[dict[str, Any]], *, trace: TaskTrace | None = None
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        response_format: dict[str, Any],
+        trace: TaskTrace | None = None,
     ) -> NextStep:
-        """Generate and validate one investigation step."""
+        """Generate and validate one investigation step under the task's step schema."""
         ...
 
 
@@ -126,12 +127,17 @@ class OpenAIStructuredStepClient:
             await self._client.close()
 
     async def next_step(
-        self, messages: list[dict[str, Any]], *, trace: TaskTrace | None = None
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        response_format: dict[str, Any],
+        trace: TaskTrace | None = None,
     ) -> NextStep:
         """Return one valid `NextStep`, repairing malformed replies when possible.
 
         Args:
             messages: Current investigation conversation.
+            response_format: Step schema built from the task's tool catalog.
             trace: Task trace that receives one `llm_call` event per attempt.
 
         Returns:
@@ -156,7 +162,9 @@ class OpenAIStructuredStepClient:
         last_error: Exception | None = None
 
         for attempt in range(1, self.max_retries + 1):
-            response, latency_ms = await self._create_completion(request_messages, trace)
+            response, latency_ms = await self._create_completion(
+                request_messages, response_format, trace
+            )
             raw_content = extract_raw_content(response)
             total_tokens = response_total_tokens(response)
             trace.llm_calls += 1
@@ -202,7 +210,7 @@ class OpenAIStructuredStepClient:
         raise NextStepRequestError(message) from last_error
 
     async def _create_completion(
-        self, messages: list[dict[str, Any]], trace: TaskTrace
+        self, messages: list[dict[str, Any]], response_format: dict[str, Any], trace: TaskTrace
     ) -> tuple[Any, int]:
         """Request one completion, repeating it after transient provider errors.
 
@@ -211,6 +219,7 @@ class OpenAIStructuredStepClient:
 
         Args:
             messages: Request messages, including structured-output instructions.
+            response_format: Step schema sent with the request.
             trace: Task trace that receives one `llm_error` event per failure.
 
         Returns:
@@ -227,7 +236,7 @@ class OpenAIStructuredStepClient:
                 response = await self._client.chat.completions.create(
                     model=self.model,
                     messages=cast(list[ChatCompletionMessageParam], messages),
-                    response_format=cast(ResponseFormatJSONSchema, NEXT_STEP_RESPONSE_FORMAT),
+                    response_format=cast(ResponseFormatJSONSchema, response_format),
                     max_completion_tokens=self.max_completion_tokens,
                 )
             except APIError as exc:

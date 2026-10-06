@@ -82,6 +82,10 @@ def test_duplicate_call_is_served_from_the_cache() -> None:
     assert decision.reason == "cached"
     assert decision.feedback is not None
     assert decision.feedback["result"] == ENTITY
+    search = {"query": "evil.exe", "reasoning": "Find it."}
+    ledger.record("search", search, [], {"status": "ok", "result": []}, failed=False)
+    padded = {"query": " evil.exe ", "reasoning": "Find it again."}
+    assert ledger.check("search", padded).reason == "cached"
 
 
 def test_finish_citing_unknown_id_or_property_is_rejected() -> None:

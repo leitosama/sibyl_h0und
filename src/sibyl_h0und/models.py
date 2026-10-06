@@ -7,8 +7,6 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
-    field_validator,
-    model_validator,
 )
 
 
@@ -191,55 +189,16 @@ class RelationSearchScope(StrictModel):
 SearchScope = Annotated[EntitySearchScope | RelationSearchScope, Field(discriminator="kind")]
 
 
-def _parse_time_boundary(value: object, *, upper: bool) -> datetime:
-    """Parse a timezone-aware search boundary or an inclusive UTC calendar day."""
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            raise ValueError("time_window boundaries must include a timezone")
-        return value.astimezone(UTC)
-    if not isinstance(value, str):
-        raise ValueError("time_window boundaries must be ISO 8601 timestamp strings")
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
-        day = datetime.fromisoformat(value).replace(tzinfo=UTC)
-        return day.replace(hour=23, minute=59, second=59, microsecond=999999) if upper else day
-    if not re.fullmatch(
-        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})",
-        value,
-    ):
-        raise ValueError("time_window boundaries must include a timezone or be calendar days")
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
-
-
 class SearchTimeWindow(StrictModel):
     """Inclusive timestamp range for graph search."""
 
     from_: datetime = Field(alias="from")
     to: datetime
 
-    @field_validator("from_", mode="before")
-    @classmethod
-    def _parse_from(cls, value: object) -> datetime:
-        """Parse the lower search boundary."""
-        return _parse_time_boundary(value, upper=False)
 
-    @field_validator("to", mode="before")
-    @classmethod
-    def _parse_to(cls, value: object) -> datetime:
-        """Parse the upper search boundary."""
-        return _parse_time_boundary(value, upper=True)
-
-    @model_validator(mode="after")
-    def _validate_bounds(self) -> "SearchTimeWindow":
-        """Reject an inverted search window."""
-        if self.from_ > self.to:
-            raise ValueError("time_window.from must be before or equal to time_window.to")
-        return self
-
-
-class SearchRequest(StrictModel):
+class SearchArguments(StrictModel):
     """Find entities and relations whose id or attributes contain a substring."""
 
-    tool: Literal["search"]
     query: Annotated[str, StringConstraints(strip_whitespace=True, min_length=5)]
     reasoning: ToolReasoning
     page_id: int = Field(default=1, ge=1)
@@ -248,26 +207,23 @@ class SearchRequest(StrictModel):
     sort_order: Literal["ascending", "descending"] = "ascending"
 
 
-class GetEntityRequest(StrictModel):
+class GetEntityArguments(StrictModel):
     """Read one entity and the ids of its incoming and outgoing relations."""
 
-    tool: Literal["get_entity"]
     entity_id: str
     reasoning: ToolReasoning
 
 
-class GetRelationRequest(StrictModel):
+class GetRelationArguments(StrictModel):
     """Read one relation, including the entities it connects."""
 
-    tool: Literal["get_relation"]
     relation_id: str
     reasoning: ToolReasoning
 
 
-class GetADObjectInfoRequest(StrictModel):
+class GetADObjectInfoArguments(StrictModel):
     """Read one Active Directory object and its navigation references."""
 
-    tool: Literal["get_ad_object_info"]
     ad_object_id: str
     reasoning: ToolReasoning
 
@@ -343,72 +299,119 @@ FinishInvestigationSubmission = Annotated[
 ]
 
 
-class FinishInvestigationRequest(StrictModel):
+class FinishInvestigationArguments(StrictModel):
     """Submit the final BlueSec1 verdict and discovered response artifacts."""
 
-    tool: Literal["finish_investigation"]
     submission: FinishInvestigationSubmission
 
 
-InvestigationFunction = (
-    SearchRequest
-    | GetEntityRequest
-    | GetRelationRequest
-    | GetADObjectInfoRequest
-    | FinishInvestigationRequest
-)
+# Argument schemas of the practice tools. The step schema uses one only when
+# the catalog entry of a tool with this name carries no usable schema of its own.
+PRACTICE_ARGUMENT_MODELS: dict[str, type[BaseModel]] = {
+    "search": SearchArguments,
+    "get_entity": GetEntityArguments,
+    "get_relation": GetRelationArguments,
+    "get_ad_object_info": GetADObjectInfoArguments,
+    "finish_investigation": FinishInvestigationArguments,
+}
 
 
-class NextStep(StrictModel):
-    """One validated reasoning-and-action turn produced by the LLM."""
+class ToolCall(BaseModel):
+    """One tool call: the tool name and its arguments as sibling keys."""
+
+    model_config = ConfigDict(extra="allow")
+
+    tool: str = Field(min_length=1)
+
+    @property
+    def arguments(self) -> dict[str, Any]:
+        """Return the arguments without the null values of omitted optional fields."""
+        return _drop_nulls(self.model_extra or {})
+
+
+class StepEnvelope(StrictModel):
+    """Reasoning fields of a step, shared by every tool catalog."""
 
     current_state: str
     plan_remaining_steps_brief: list[str] = Field(min_length=1, max_length=5)
     task_completed: bool
-    function: InvestigationFunction = Field(description="Execute the first remaining step.")
 
 
-def build_strict_json_schema() -> dict[str, Any]:
-    """Build a provider-portable strict JSON Schema for `NextStep`.
+class NextStep(StepEnvelope):
+    """One validated reasoning-and-action turn produced by the LLM."""
 
-    Returns:
-        Schema with closed objects, required nullable fields, and no defaults.
+    function: ToolCall = Field(description="Execute the first remaining step.")
+
+
+def _drop_nulls(value: Any) -> Any:
+    """Remove `None` values from dicts at every depth.
+
+    Strict schemas make optional fields required and nullable, so the model
+    sends `null` for every argument it leaves out.
     """
-    schema = NextStep.model_json_schema(by_alias=True)
-    _normalize_strict_schema(schema)
-    return schema
+    if isinstance(value, dict):
+        return {key: _drop_nulls(item) for key, item in value.items() if item is not None}
+    if isinstance(value, list):
+        return [_drop_nulls(item) for item in value]
+    return value
 
 
-def _normalize_strict_schema(node: Any) -> None:
-    """Normalize nested schema nodes for strict OpenAI-compatible providers.
+def normalize_time_windows(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Check and normalize every `time_window` argument at any depth.
+
+    A calendar day becomes the whole UTC day: `from` its first and `to` its
+    last microsecond. A timestamp must carry its timezone and is converted
+    to UTC. The window must not be inverted.
 
     Args:
-        node: Mutable JSON Schema node or collection.
+        arguments: Tool arguments without nulls.
+
+    Returns:
+        A copy with each `{"from": ..., "to": ...}` window normalized.
+
+    Raises:
+        ValueError: If a boundary is malformed or the window is inverted.
     """
-    if isinstance(node, list):
-        for record in node:
-            _normalize_strict_schema(record)
-        return
-    if not isinstance(node, dict):
-        return
 
-    node.pop("default", None)
-    node.pop("discriminator", None)
-    if "oneOf" in node:
-        node["anyOf"] = node.pop("oneOf")
-    properties = node.get("properties")
-    if node.get("type") == "object" and isinstance(properties, dict):
-        node["additionalProperties"] = False
-        node["required"] = list(properties)
-    for value in node.values():
-        _normalize_strict_schema(value)
+    def walk(value: Any, key: str | None = None) -> Any:
+        if isinstance(value, list):
+            return [walk(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        if key == "time_window":
+            lower = value.get("from")
+            upper = value.get("to")
+            window = dict(value)
+            if isinstance(lower, str):
+                window["from"] = _parse_time_boundary(lower, upper=False)
+            if isinstance(upper, str):
+                window["to"] = _parse_time_boundary(upper, upper=True)
+            if isinstance(lower, str) and isinstance(upper, str) and window["from"] > window["to"]:
+                raise ValueError("time_window.from must be before or equal to time_window.to")
+            return {
+                name: _format_utc(item) if isinstance(item, datetime) else item
+                for name, item in window.items()
+            }
+        return {name: walk(item, name) for name, item in value.items()}
+
+    return walk(arguments)
 
 
-NEXT_STEP_RESPONSE_FORMAT = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "bluesec1_next_step",
-        "strict": True,
-        "schema": build_strict_json_schema(),
-    },
-}
+def _parse_time_boundary(value: str, *, upper: bool) -> datetime:
+    """Parse a timezone-aware search boundary or an inclusive UTC calendar day."""
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        day = datetime.fromisoformat(value).replace(tzinfo=UTC)
+        return day.replace(hour=23, minute=59, second=59, microsecond=999999) if upper else day
+    if not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})",
+        value,
+    ):
+        raise ValueError(
+            f"time_window boundary {value!r} must include a timezone or be a calendar day"
+        )
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def _format_utc(value: datetime) -> str:
+    """Format a UTC datetime the way the practice runtime accepted it."""
+    return value.isoformat().replace("+00:00", "Z")

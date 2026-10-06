@@ -35,7 +35,9 @@ src/sibyl_h0und/
   settings.py                  настройки из окружения / .env
   agent.py                     SimpleSGRAgent: цикл «одно действие за ход», SYSTEM_PROMPT
   llm.py                       клиент OpenAI-совместимого API со structured output
-  models.py                    pydantic-схемы шага (NextStep) и аргументов инструментов
+  catalog.py                   ToolCatalog: каталог задачи и строгая схема шага из него
+  budget.py                    CallBudget: страховочный лимит вызовов runtime, режим «только отчёт»
+  models.py                    оболочка шага (NextStep, ToolCall), схемы аргументов practice
   ledger.py                    GraphLedger: известные id, кэш вызовов, проверка finish
   flags.py                     флаги: Finding, LevelRule, ScoreRule, LookupRule, FlagBoard,
                                NodeContext, лимит флагов на ответ
@@ -50,7 +52,8 @@ tests/                         тесты без сети
 ```
 
 Цикл агента: на каждом шаге модель возвращает `NextStep` (состояние, план,
-один вызов инструмента) по строгой JSON-схеме. Агент проверяет вызов по
+один вызов инструмента) по строгой JSON-схеме, которую `ToolCatalog` строит
+из `available_tools` задачи. Агент проверяет вызов по
 каталогу задачи и в GraphLedger, отправляет в runtime только то, что нельзя
 ответить локально, и добавляет в историю `last_tool_result` вместе с
 `still_open` и `flags`. Задача заканчивается, когда `finish_investigation`
@@ -62,8 +65,8 @@ tests/                         тесты без сети
 | --- | --- |
 | Клиент `src/bluesec1_client/` и `proto/` не правим, поведение поверх — обёрткой в `sibyl_h0und` | [0001](adr/0001-vendored-client.md) |
 | Один агент, токены — профили `.env.*`, запуск только с `--env-file` | [0002](adr/0002-one-agent-token-profiles.md) |
-| Инструменты строим только из `available_tools`. Не выполнено: схема шага захардкожена, [#27](https://github.com/leitosama/sibyl_h0und/issues/27) | [0003](adr/0003-tools-from-available-tools.md) |
-| Экономим вызовы без бюджета шагов; страховочный лимит в коде — меньше 100 вызовов runtime. Не выполнено: [#28](https://github.com/leitosama/sibyl_h0und/issues/28) | [0004](adr/0004-call-economy-without-step-budget.md) |
+| Инструменты строим только из `available_tools`, схема шага — из каталога задачи | [0003](adr/0003-tools-from-available-tools.md), [0014](adr/0014-step-schema-from-catalog.md) |
+| Экономим вызовы без бюджета шагов; страховочный лимит — 95 вызовов runtime, у лимита остаётся только `finish_investigation` | [0004](adr/0004-call-economy-without-step-budget.md), [0015](adr/0015-runtime-call-ceiling.md) |
 | GraphLedger отвечает локально на выдуманные id и повторы и проверяет `finish_investigation` | [0005](adr/0005-graph-ledger.md) |
 | Пошаговый `reward` runtime — только для офлайн-разбора | [0006](adr/0006-step-reward-offline-only.md) |
 | Модель получает алерт и каталог один раз, дальше только новые улики | [0007](adr/0007-compact-llm-context.md) |

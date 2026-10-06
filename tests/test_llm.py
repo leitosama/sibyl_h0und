@@ -19,16 +19,7 @@ from sibyl_h0und.llm import (
     OpenAIStructuredStepClient,
     parse_next_step_payload,
 )
-from sibyl_h0und.models import (
-    NEXT_STEP_RESPONSE_FORMAT,
-    BenignFinishInvestigationSubmission,
-    FinishInvestigationEntityEvidence,
-    FinishInvestigationRequest,
-    GetADObjectInfoRequest,
-    GetEntityRequest,
-    NextStep,
-    SearchRequest,
-)
+from sibyl_h0und.models import NextStep
 from sibyl_h0und.trace import TaskTrace, llm_requests
 
 
@@ -70,16 +61,22 @@ class FakeOpenAI:
 
 def valid_process_step() -> NextStep:
     """Build one valid non-terminal graph navigation step."""
-    return NextStep(
-        current_state="The trigger entity needs its relations.",
-        plan_remaining_steps_brief=["Read the trigger entity."],
-        task_completed=False,
-        function=GetEntityRequest(
-            tool="get_entity",
-            entity_id="entity-1",
-            reasoning="Inspect the alert entity.",
-        ),
+    return NextStep.model_validate(
+        {
+            "current_state": "The trigger entity needs its relations.",
+            "plan_remaining_steps_brief": ["Read the trigger entity."],
+            "task_completed": False,
+            "function": {
+                "tool": "get_entity",
+                "entity_id": "entity-1",
+                "reasoning": "Inspect the alert entity.",
+            },
+        }
     )
+
+
+# The schema itself is built and tested in test_catalog; the client only forwards it.
+STEP_FORMAT = {"type": "json_schema", "json_schema": {"name": "step", "schema": {}}}
 
 
 def test_structured_client_repairs_malformed_response(tmp_path: Path) -> None:
@@ -98,10 +95,13 @@ def test_structured_client_repairs_malformed_response(tmp_path: Path) -> None:
     original_messages = [{"role": "system", "content": "Investigate."}]
     trace = TaskTrace(tmp_path / "task.trace.jsonl")
 
-    step = asyncio.run(client.next_step(original_messages, trace=trace))
+    step = asyncio.run(
+        client.next_step(original_messages, response_format=STEP_FORMAT, trace=trace)
+    )
 
     assert step.function.tool == "get_entity"
     assert len(fake_openai.completions.requests) == 2
+    assert fake_openai.completions.requests[0]["response_format"] == STEP_FORMAT
     first_messages = fake_openai.completions.requests[0]["messages"]
     assert "Never use top-level `action`" in first_messages[0]["content"]
     assert "advertised_tool" in first_messages[0]["content"]
@@ -115,7 +115,7 @@ def test_structured_client_repairs_malformed_response(tmp_path: Path) -> None:
         {"role": "assistant", "content": "Read the trigger entity."},
         {"role": "tool", "content": "{}", "tool_call_id": "step_1"},
     ]
-    asyncio.run(client.next_step(next_messages, trace=trace))
+    asyncio.run(client.next_step(next_messages, response_format=STEP_FORMAT, trace=trace))
 
     events = [json.loads(line) for line in trace.path.read_text(encoding="utf-8").splitlines()]
     assert [event["attempt"] for event in events] == [1, 2, 1]
@@ -127,25 +127,41 @@ def test_structured_client_repairs_malformed_response(tmp_path: Path) -> None:
     assert (trace.llm_calls, trace.llm_tokens) == (3, 51)
 
 
-def test_parser_accepts_finish_with_stale_completion_flag() -> None:
-    """A finish call must reach the runtime even when the model leaves the flag false."""
-    finish = FinishInvestigationRequest(
-        tool="finish_investigation",
-        submission=BenignFinishInvestigationSubmission(
-            verdict="benign",
-            legitimacy_evidence=[
-                FinishInvestigationEntityEvidence(
-                    anchor="entity", entity_id="entity-1", property_fields=["cmdline"]
-                )
-            ],
-            reasoning="Routine activity.",
-        ),
+def test_parser_keeps_arguments_of_any_tool_without_nulls() -> None:
+    """A tool unknown to the code keeps its arguments; nulls of omitted ones are dropped."""
+    payload = json.dumps(
+        {
+            "current_state": "The alert is explained by authorized activity.",
+            "plan_remaining_steps_brief": ["Submit the verdict."],
+            # A finish call must reach the runtime even when the model leaves this false.
+            "task_completed": False,
+            "function": {
+                "tool": "finish_investigation_v2",
+                "submission": {
+                    "verdict": "benign",
+                    "legitimacy_evidence": [
+                        {"anchor": "relation", "relation_id": "rel-1", "property_fields": []}
+                    ],
+                    "confidence": None,
+                },
+                "page_id": None,
+            },
+        }
     )
-    payload = valid_process_step().model_copy(update={"function": finish}).model_dump_json()
 
-    step = parse_next_step_payload(payload)
+    step = parse_next_step_payload(f"```json\n{payload}\n```")
 
-    assert isinstance(step.function, FinishInvestigationRequest)
+    assert step.function.tool == "finish_investigation_v2"
+    assert step.function.arguments == {
+        "submission": {
+            "verdict": "benign",
+            "legitimacy_evidence": [
+                {"anchor": "relation", "relation_id": "rel-1", "property_fields": []}
+            ],
+        }
+    }
+    with pytest.raises(ValueError):
+        parse_next_step_payload(json.dumps({**json.loads(payload), "function": {"x": 1}}))
 
 
 REQUEST = httpx.Request("POST", "https://llm.example/v1/chat/completions")
@@ -196,136 +212,11 @@ def test_structured_client_retries_only_transient_provider_errors(
     messages = [{"role": "system", "content": "Investigate."}]
 
     if requests > len(errors):
-        step = asyncio.run(client.next_step(messages, trace=trace))
+        step = asyncio.run(client.next_step(messages, response_format=STEP_FORMAT, trace=trace))
         assert step.function.tool == "get_entity"
     else:
         with pytest.raises(type(errors[requests - 1])):
-            asyncio.run(client.next_step(messages, trace=trace))
+            asyncio.run(client.next_step(messages, response_format=STEP_FORMAT, trace=trace))
     assert len(fake_openai.completions.requests) == requests
     events = [json.loads(line) for line in trace.path.read_text(encoding="utf-8").splitlines()]
     assert [event["kind"] for event in events].count("llm_error") == min(len(errors), requests)
-
-
-def test_response_schema_requires_nullable_tool_fields() -> None:
-    """Strict provider schema should require optional fields as nullable values."""
-    schema = NEXT_STEP_RESPONSE_FORMAT["json_schema"]["schema"]
-    process_schema = schema["$defs"]["GetEntityRequest"]
-
-    assert set(process_schema["required"]) == set(process_schema["properties"])
-    assert "default" not in str(schema)
-    assert "discriminator" not in str(schema)
-    assert "oneOf" not in str(schema)
-    assert set(schema["$defs"]["SearchRequest"]["required"]) == set(
-        schema["$defs"]["SearchRequest"]["properties"]
-    )
-    assert set(schema["$defs"]["FinishInvestigationRequest"]["properties"]) == {
-        "tool",
-        "submission",
-    }
-
-
-def test_competition_search_serializes_extended_arguments() -> None:
-    """Search should retain every argument supported by the competition tool."""
-    request = SearchRequest.model_validate(
-        {
-            "tool": "search",
-            "query": "powershell",
-            "reasoning": "Find the related process.",
-            "page_id": 2,
-            "scope": {"kind": "entity", "type": "windows_process"},
-            "time_window": {"from": "2026-09-01", "to": "2026-09-02"},
-            "sort_order": "descending",
-        }
-    )
-
-    arguments = request.model_dump(mode="json", by_alias=True, exclude={"tool"}, exclude_none=True)
-
-    assert arguments["page_id"] == 2
-    assert arguments["scope"] == {"kind": "entity", "type": "windows_process"}
-    assert arguments["time_window"] == {
-        "from": "2026-09-01T00:00:00Z",
-        "to": "2026-09-02T23:59:59.999999Z",
-    }
-    assert arguments["sort_order"] == "descending"
-    with pytest.raises(ValueError):
-        SearchRequest.model_validate(
-            {"tool": "search", "query": "process", "reasoning": "Inspect.", "page_id": 0}
-        )
-    with pytest.raises(ValueError):
-        SearchRequest.model_validate(
-            {
-                "tool": "search",
-                "query": "process",
-                "reasoning": "Inspect.",
-                "scope": {"kind": "entity", "type": "nonexistent"},
-            }
-        )
-    with pytest.raises(ValueError):
-        SearchRequest.model_validate(
-            {
-                "tool": "search",
-                "query": "process",
-                "reasoning": "Inspect.",
-                "time_window": {"from": "2026-09-02", "to": "2026-09-01"},
-            }
-        )
-
-
-def test_navigation_requires_reasoning_and_supports_ad_lookup() -> None:
-    """Competition navigation tools should require a bounded rationale."""
-    with pytest.raises(ValueError):
-        GetEntityRequest.model_validate({"tool": "get_entity", "entity_id": "entity-1"})
-    with pytest.raises(ValueError):
-        GetADObjectInfoRequest.model_validate(
-            {"tool": "get_ad_object_info", "ad_object_id": "ad-1", "reasoning": "x" * 4097}
-        )
-
-    request = GetADObjectInfoRequest(
-        tool="get_ad_object_info", ad_object_id="ad-1", reasoning="Inspect the account."
-    )
-    assert request.model_dump(exclude={"tool"}) == {
-        "ad_object_id": "ad-1",
-        "reasoning": "Inspect the account.",
-    }
-
-
-def test_benign_finish_uses_submission_envelope() -> None:
-    """Benign conclusions should contain only legitimacy evidence."""
-    request = FinishInvestigationRequest(
-        tool="finish_investigation",
-        submission=BenignFinishInvestigationSubmission(
-            verdict="benign",
-            legitimacy_evidence=[
-                FinishInvestigationEntityEvidence(
-                    anchor="entity", entity_id="entity-1", property_fields=["command_line"]
-                )
-            ],
-            reasoning="The process matches authorized activity.",
-        ),
-    )
-
-    assert request.model_dump(exclude={"tool"}) == {
-        "submission": {
-            "verdict": "benign",
-            "legitimacy_evidence": [
-                {"anchor": "entity", "entity_id": "entity-1", "property_fields": ["command_line"]}
-            ],
-            "reasoning": "The process matches authorized activity.",
-        }
-    }
-    step = NextStep(
-        current_state="The alert is explained by authorized activity.",
-        plan_remaining_steps_brief=["Submit benign evidence."],
-        task_completed=True,
-        function=request,
-    )
-    assert isinstance(
-        parse_next_step_payload(step.model_dump_json()).function, FinishInvestigationRequest
-    )
-    with pytest.raises(ValueError):
-        FinishInvestigationRequest.model_validate(
-            {
-                "tool": "finish_investigation",
-                "submission": {"verdict": "benign", "ir_artifacts": [], "reasoning": "Safe."},
-            }
-        )
