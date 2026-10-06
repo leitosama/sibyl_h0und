@@ -65,7 +65,6 @@ def valid_process_step() -> NextStep:
         {
             "current_state": "The trigger entity needs its relations.",
             "plan_remaining_steps_brief": ["Read the trigger entity."],
-            "task_completed": False,
             "function": {
                 "tool": "get_entity",
                 "entity_id": "entity-1",
@@ -127,14 +126,28 @@ def test_structured_client_repairs_malformed_response(tmp_path: Path) -> None:
     assert (trace.llm_calls, trace.llm_tokens) == (3, 51)
 
 
+def test_parser_drops_envelope_keys_the_agent_does_not_read() -> None:
+    """A stray `task_completed` from the old contract does not cost a repair (ADR 0009)."""
+    payload = json.dumps(
+        {
+            "current_state": "The trigger entity needs its relations.",
+            "plan_remaining_steps_brief": ["Read the trigger entity."],
+            "task_completed": True,
+            "function": {"tool": "get_entity", "entity_id": "entity-1", "reasoning": "Inspect."},
+        }
+    )
+
+    step = parse_next_step_payload(payload)
+
+    assert step.function.tool == "get_entity"
+
+
 def test_parser_keeps_arguments_of_any_tool_without_nulls() -> None:
     """A tool unknown to the code keeps its arguments; nulls of omitted ones are dropped."""
     payload = json.dumps(
         {
             "current_state": "The alert is explained by authorized activity.",
             "plan_remaining_steps_brief": ["Submit the verdict."],
-            # A finish call must reach the runtime even when the model leaves this false.
-            "task_completed": False,
             "function": {
                 "tool": "finish_investigation_v2",
                 "submission": {

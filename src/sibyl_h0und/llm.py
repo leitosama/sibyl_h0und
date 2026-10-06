@@ -28,7 +28,6 @@ Every assistant reply must be exactly one JSON object with these top-level field
 {
   "current_state": "short evidence-focused string",
   "plan_remaining_steps_brief": ["one to five short step strings"],
-  "task_completed": false,
   "function": {
     "tool": "one advertised tool name",
     "...": "that tool's arguments placed directly in this function object"
@@ -39,7 +38,6 @@ Never use top-level `action`, `parameters`, `tool_name`, or `arguments` fields.
 Never wrap tool arguments in a nested `parameters` or `arguments` object.
 For example, a call with one advertised argument is:
 {"tool":"advertised_tool","argument_name":"value"}
-Set task_completed=true only for a function whose tool is finish_investigation.
 Return no prose, markdown, XML, comments, or keys outside the required object.
 """.strip()
 
