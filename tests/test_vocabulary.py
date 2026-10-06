@@ -146,6 +146,7 @@ def test_cheat_sheet_rates_a_windows_directory_as_the_sheet_does_for_a_flagged_f
             "WindowsRunKeys",
         ),
         ("HKLM\\System\\ControlSet001\\Services\\PSEXESVC", "WindowsServices"),
+        ("HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", "WindowsRunKeys"),
     ],
 )
 def test_a_registry_path_finds_the_autostart_location_that_holds_it(
@@ -197,3 +198,16 @@ def test_a_dll_name_brings_where_its_legitimate_copy_lives() -> None:
 )
 def test_benign_drops_get_no_driver_or_dll_entry(query: str) -> None:
     assert not sources(shared().lookup(query)) & {"loldrivers", "hijacklibs"}
+
+
+def test_an_artifact_that_names_one_value_does_not_cover_the_keys_below_its_key() -> None:
+    """`Control` is listed for one value only; a key below it gets no entry from it."""
+    below = shared().lookup("HKLM\\System\\CurrentControlSet\\Control\\Terminal Server")
+    exact = shared().lookup("HKLM\\System\\CurrentControlSet\\Control")
+
+    assert below["matches"] == []
+    assert [m["relation"] for m in exact["matches"]] == ["same_key"]
+    assert (
+        shared().lookup("HKLM\\System\\CurrentControlSet\\Services\\x")["matches"][0]["relation"]
+        == "key_is_below"
+    )

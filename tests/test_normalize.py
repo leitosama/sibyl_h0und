@@ -111,6 +111,9 @@ def test_domain_extracts_the_host_name(value: str, expected: str | None) -> None
         ("HKU\\S-1-5-21-1-2-3-1001\\Software\\Run", "hkey_current_user\\software\\run"),
         ("HKEY_USERS\\%%users.sid%%\\Software\\Run", "hkey_current_user\\software\\run"),
         ("HKEY_USERS", "hkey_users"),
+        ("HKLM:\\Software\\Run", "hkey_local_machine\\software\\run"),
+        ("Registry::HKEY_CURRENT_USER\\Software\\Run", "hkey_current_user\\software\\run"),
+        ("HKU\\S-1-5-21-1-2-3-1001_Classes\\CLSID", "hkey_current_user\\software\\classes\\clsid"),
         (
             "HKLM\\System\\ControlSet002\\Services\\x",
             "hkey_local_machine\\system\\currentcontrolset\\services\\x",

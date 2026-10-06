@@ -45,7 +45,11 @@ _HIVES = {
     "hkcr": "hkey_classes_root",
     "hku": "hkey_users",
 }
-_USER_HIVE = re.compile(r"^hkey_users\\(?:s-1-[\d-]+|%%users\.sid%%|\.default)(?=\\|$)")
+_USER_HIVE = re.compile(r"^hkey_users\\(?:s-1-[\d-]+|%%users\.sid%%)(?=\\|$)")
+# `HKU\<sid>_Classes\X` is the same key as `HKCU\Software\Classes\X`.
+_USER_CLASSES = re.compile(r"^hkey_users\\(?:s-1-[\d-]+|%%users\.sid%%)_classes(?=\\|$)")
+# PowerShell spells a key `HKLM:\...` or `Registry::HKEY_LOCAL_MACHINE\...`.
+_POWERSHELL_PREFIX = re.compile(r"^registry::", re.IGNORECASE)
 _CONTROL_SET = re.compile(r"\\controlset\d+(?=\\|$)")
 
 
@@ -54,10 +58,12 @@ def registry_path(value: Any) -> str | None:
 
     The hive is spelled out (`HKLM` is `hkey_local_machine`), a user's hive
     (`HKEY_USERS\\<sid>`) is `hkey_current_user`, `ControlSet001` is
-    `CurrentControlSet`, and a trailing `\\*` or separator is dropped.
+    `CurrentControlSet`, a PowerShell `HKLM:` or `Registry::` prefix is dropped, and a
+    trailing `\\*` or separator is dropped.
     """
     if not isinstance(value, str) or not (path := value.strip().strip('"').strip()):
         return None
+    path = _POWERSHELL_PREFIX.sub("", path)
     path = re.sub(r"\\{2,}", r"\\", path.replace("/", "\\").lower()).rstrip("\\")
     path = path.removesuffix("\\*").rstrip("\\")
     # The kernel spelling `\REGISTRY\MACHINE\...` names the same hives.
@@ -67,7 +73,9 @@ def registry_path(value: Any) -> str | None:
         path,
     )
     head, separator, rest = path.partition("\\")
+    head = head.removesuffix(":")
     path = _HIVES.get(head, head) + separator + rest
+    path = _USER_CLASSES.sub("hkey_current_user\\\\software\\\\classes", path)
     path = _USER_HIVE.sub("hkey_current_user", path)
     path = _CONTROL_SET.sub(r"\\currentcontrolset", path)
     return path if path.startswith("hkey_") else None

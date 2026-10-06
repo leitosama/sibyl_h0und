@@ -66,7 +66,9 @@ def build(drivers: list[dict], version_source: bytes, retrieved: str) -> dict:
             }
         )
         names = list(driver.get("Tags") or [])
-        samples = driver.get("KnownVulnerableSamples") or []
+        samples = [
+            item for item in driver.get("KnownVulnerableSamples") or [] if isinstance(item, dict)
+        ]
         for sample in samples:
             names += [sample.get("Filename"), sample.get("OriginalFilename")]
         keys = [file_key(name) for name in names if isinstance(name, str)]

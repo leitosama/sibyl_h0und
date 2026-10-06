@@ -52,7 +52,7 @@ KNOWLEDGE_TOOL_SPEC: dict[str, Any] = {
         "WTFBins benign programs that look suspicious, ForensicArtifacts Windows autostart "
         "registry locations, LOLDrivers abusable drivers, HijackLibs DLL hijacking "
         "opportunities, and the Nextron antivirus cheat sheet. "
-        "The query is an ATT&CK id (T1036.003, S0195), a file name or path, a file hash, "
+        "The query is an ATT&CK id (T1036.003, S0195), a file name or path, a SHA-256, "
         "a registry key path, a domain, or words describing behavior. Entries are returned as "
         "the sources state them, with no verdict."
     ),
@@ -178,9 +178,11 @@ class Vocabulary:
         matches: list[dict[str, Any]] = []
         if text:
             matches += self._by_id(text)
-            matches += self._by_registry(text)
-            matches += [] if registry_path(text) else self._by_program(text)
-            matches += [] if registry_path(text) else self._by_driver(text)
+            if registry_path(text):
+                matches += self._by_registry(text)
+            else:
+                matches += self._by_program(text)
+                matches += self._by_driver(text)
             matches += self._by_domain(text)
             matches += self._by_cheat_sheet(text)
             if self._is_description(text) or (not matches and _PLAIN_WORD.match(text)):
@@ -324,19 +326,30 @@ class Vocabulary:
         return found
 
     def _by_registry(self, text: str) -> list[dict[str, Any]]:
-        """Find the autostart locations that are the queried registry key or its parents."""
-        if (path := registry_path(text)) is None:
-            return []
+        """Find the autostart locations for a registry key: the key itself and its parents.
+
+        An artifact that names one value of a key applies to that key only; one that
+        names the key as a whole also applies to the keys below it. `relation` says
+        which of the two the answer is.
+        """
+        path = registry_path(text)
+        parts = (path or "").split("\\")
         found = []
-        parts = path.split("\\")
         for end in range(len(parts), 0, -1):
             key = "\\".join(parts[:end])
-            if (entries := self._autostart.entries.get(key)) is not None:
+            exact = end == len(parts)
+            entries = [
+                entry
+                for entry in self._autostart.entries.get(key, ())
+                if exact or "value" not in entry
+            ]
+            if entries:
                 found.append(
                     {
                         "source": "forensicartifacts",
                         "kind": "autostart_location",
                         "key": key,
+                        "relation": "same_key" if exact else "key_is_below",
                         "queried": text,
                         "artifacts": entries,
                     }

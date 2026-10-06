@@ -110,7 +110,10 @@ def main() -> None:
             for path in sorted(args.input_dir.rglob("*.yml"))
         }
     else:
-        tree = json.loads(_download(TREE))["tree"]
+        listing = json.loads(_download(TREE))
+        if listing.get("truncated"):
+            raise SystemExit("GitHub truncated the file listing; use --input-dir with a checkout.")
+        tree = listing["tree"]
         paths = sorted(
             item["path"]
             for item in tree

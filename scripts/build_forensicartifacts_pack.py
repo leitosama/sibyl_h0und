@@ -70,9 +70,12 @@ def build(text: str, retrieved: str) -> dict:
         for source in doc.get("sources", []):
             attributes = source.get("attributes", {})
             if source["type"] == "REGISTRY_KEY":
-                pairs += [(key, None) for key in attributes["keys"]]
+                pairs += [(key, None) for key in attributes.get("keys", [])]
             elif source["type"] == "REGISTRY_VALUE":
-                pairs += [(pair["key"], pair["value"]) for pair in attributes["key_value_pairs"]]
+                pairs += [
+                    (pair["key"], pair.get("value"))
+                    for pair in attributes.get("key_value_pairs", [])
+                ]
         for key, value in pairs:
             # A wildcard inside a path (`Classes\*\shell`) matches no concrete key.
             if (normalized := registry_path(key)) is None or "*" in normalized:
