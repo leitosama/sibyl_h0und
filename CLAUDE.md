@@ -28,8 +28,10 @@ Each rule points to the ADR that explains it.
 - Build runtime tool calls from the task's `available_tools`, never from a
   hard-coded list: tools may differ on the competition day. (ADR 0003)
 - Every runtime tool call costs score, but quality outweighs it. Do not add
-  calls that repeat a known entity or relation lookup, and do not add a fixed
-  step budget beyond the runtime's 100 calls. (ADR 0004, 0005)
+  calls that repeat a known entity or relation lookup, and do not add a step
+  budget to save calls. The only limit is a safety ceiling in code below the
+  runtime's 100 calls, counted in runtime calls, that leaves room for
+  `finish_investigation`. (ADR 0004, 0005)
 - `finish_investigation` may cite only ids the runtime actually returned,
   and only entities that belong to the incident: extra report entities are
   penalized. (ADR 0005, 0013)
@@ -44,8 +46,8 @@ Each rule points to the ADR that explains it.
   runtime calls, every rule names its source, and the model decides the
   verdict. (ADR 0010, 0011)
 - Knowledge comes from committed JSON packs built by
-  `scripts/build_<name>_pack.py`, with provenance, a permissive license and
-  a `NOTICE` entry; agents and CI never fetch it at run time. Merge a rule
+  `scripts/build_<name>_pack.py`, with provenance; agents and CI never
+  fetch it at run time. Merge a rule
   change or a new source only after `scripts/replay_flags.py --compare`
   against `main`. (ADR 0010, 0012)
 - Never commit `.env*` (except `.env.example`), task dumps or traces. Traces
