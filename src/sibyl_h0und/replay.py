@@ -8,17 +8,20 @@ about a second.
 
 A replay judges the nodes the recorded agent happened to visit. It shows what
 a flag could have told the model, not what the model would then have done.
+
+Every rule names its knowledge source, and the tables and `--compare` break
+results down by source, so a new source shows what it adds before it is merged.
 """
 
 import argparse
 import json
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from sibyl_h0und.flags import HIGH, LOW, MEDIUM, Finding, FlagBoard
+from sibyl_h0und.flags import HIGH, LEVEL_ORDER, LOW, MEDIUM, Finding, FlagBoard, rank_flags
 from sibyl_h0und.rules import DEFAULT_RULES
 
 DEFAULT_ROOT = Path("~/.local/share/sibyl_h0und").expanduser()
@@ -28,7 +31,6 @@ CACHE_NAME = "tasks-v2.jsonl"
 # Quality below this marks a task as probably wrong. The runtime does not say
 # whether a verdict was right, so this is a heuristic to be tuned by the reader.
 DEFAULT_WRONG_BELOW = 0.2
-LEVEL_ORDER = {LOW: 0, MEDIUM: 1, HIGH: 2}
 
 Task = dict[str, Any]
 Findings = dict[str, list[Finding]]
@@ -118,22 +120,27 @@ def load_tasks(trace_dir: Path, cache_dir: Path, *, rebuild: bool = False) -> li
     return tasks
 
 
-def replay(tasks: Iterable[Task]) -> Findings:
+def replay(tasks: Iterable[Task]) -> tuple[Findings, Findings]:
     """Run the default rules over every task, as the agent would have.
 
     Args:
         tasks: Extracted tasks.
 
     Returns:
-        Latest finding of each rule about each node, by `task_key`.
+        By `task_key`: the latest finding of each rule about each node, and the
+        findings the model would have seen after the per-result flag limit.
     """
     findings: Findings = {}
+    shown: Findings = {}
     for task in tasks:
         board = FlagBoard(DEFAULT_RULES)
+        seen: list[Finding] = []
         for result in task["results"]:
-            board.observe(result)
+            groups, _ = rank_flags(board.observe(result))
+            seen.extend(finding for group in groups for finding in group)
         findings[task_key(task)] = list(board.findings.values())
-    return findings
+        shown[task_key(task)] = seen
+    return findings, shown
 
 
 def is_wrong(task: Task, wrong_below: float) -> bool | None:
@@ -155,6 +162,42 @@ def rule_table(tasks: list[Task], findings: Findings, wrong_below: float) -> lis
         One row per rule with the number of wrong and other tasks it fired on
         and the number of nodes it fired on.
     """
+    sources = {finding.rule: finding.source for items in findings.values() for finding in items}
+    return [
+        {"rule": rule, "source": sources[rule], **counts}
+        for rule, counts in _fired(tasks, findings, wrong_below, lambda item: item.rule).items()
+    ]
+
+
+def source_table(
+    tasks: list[Task], findings: Findings, shown: Findings, wrong_below: float
+) -> list[dict[str, Any]]:
+    """Count, per knowledge source, the tasks and nodes it reached medium or high on.
+
+    Args:
+        tasks: Extracted tasks.
+        findings: First result of `replay`.
+        shown: Second result of `replay`.
+        wrong_below: Quality under which a task counts as wrong.
+
+    Returns:
+        One row per source, as in `rule_table`, plus the number of its findings
+        that would have reached the model after the flag limit.
+    """
+    seen: dict[str, int] = defaultdict(int)
+    for task in tasks:
+        for finding in shown[task_key(task)]:
+            seen[finding.source] += 1
+    return [
+        {"source": source, **counts, "shown": seen[source]}
+        for source, counts in _fired(tasks, findings, wrong_below, lambda item: item.source).items()
+    ]
+
+
+def _fired(
+    tasks: list[Task], findings: Findings, wrong_below: float, group_by: Callable[[Finding], str]
+) -> dict[str, dict[str, Any]]:
+    """Count wrong and other tasks, and nodes, with a medium or high finding per group."""
     totals = {"wrong": 0, "other": 0}
     fired: dict[str, dict[str, set[str]]] = defaultdict(lambda: {"wrong": set(), "other": set()})
     nodes: dict[str, int] = defaultdict(int)
@@ -166,25 +209,52 @@ def rule_table(tasks: list[Task], findings: Findings, wrong_below: float) -> lis
         totals[group] += 1
         for finding in findings[task_key(task)]:
             if finding.level != LOW:
-                fired[finding.rule][group].add(task_key(task))
-                nodes[finding.rule] += 1
-    return [
-        {
-            "rule": rule,
+                fired[group_by(finding)][group].add(task_key(task))
+                nodes[group_by(finding)] += 1
+    return {
+        name: {
             "wrong_tasks": f"{len(groups['wrong'])}/{totals['wrong']}",
             "other_tasks": f"{len(groups['other'])}/{totals['other']}",
-            "nodes": nodes[rule],
+            "nodes": nodes[name],
         }
-        for rule, groups in sorted(fired.items())
-    ]
-
-
-def snapshot(findings: Findings) -> dict[str, list[str]]:
-    """Reduce findings to comparable strings, by `task_key`."""
-    return {
-        key: sorted(f"{item.rule}|{item.node_id}|{item.level}" for item in items)
-        for key, items in findings.items()
+        for name, groups in sorted(fired.items())
     }
+
+
+def snapshot(findings: Findings) -> dict[str, Any]:
+    """Reduce findings to a baseline: comparable strings by `task_key` and rule sources."""
+    return {
+        "sources": {item.rule: item.source for items in findings.values() for item in items},
+        "tasks": {
+            key: sorted(f"{item.rule}|{item.node_id}|{item.level}" for item in items)
+            for key, items in findings.items()
+        },
+    }
+
+
+def read_baseline(data: dict[str, Any]) -> dict[str, Any]:
+    """Accept a saved baseline, including the older form without rule sources."""
+    if "tasks" in data and "sources" in data:
+        return data
+    return {"sources": {}, "tasks": data}
+
+
+def source_changes(
+    changes: dict[str, dict[str, list[str]]], sources: dict[str, str]
+) -> dict[str, dict[str, int]]:
+    """Count findings gained and lost per source.
+
+    Args:
+        changes: Result of `diff`.
+        sources: Source of each rule, from both baselines; a rule missing from
+            both counts under `?`.
+    """
+    counts: dict[str, dict[str, int]] = defaultdict(lambda: {"gained": 0, "lost": 0})
+    for change in changes.values():
+        for kind in ("gained", "lost"):
+            for entry in change[kind]:
+                counts[sources.get(entry.split("|", 1)[0], "?")][kind] += 1
+    return dict(sorted(counts.items()))
 
 
 def diff(old: dict[str, list[str]], new: dict[str, list[str]]) -> dict[str, dict[str, list[str]]]:
@@ -232,14 +302,20 @@ def main(argv: list[str] | None = None) -> None:
         for task in load_tasks(args.traces, args.cache, rebuild=args.rebuild)
         if args.run in (task["run_id"] or "")
     ]
-    findings = replay(tasks)
+    findings, shown = replay(tasks)
 
     print("\n".join(task_rows(tasks, findings, args.wrong_below)))
     print(f"\nRules at medium or high (wrong = quality < {args.wrong_below}):")
     for row in rule_table(tasks, findings, args.wrong_below):
         print(
-            f"  {row['rule']:28} wrong {row['wrong_tasks']:>6}  "
+            f"  {row['rule']:28} {row['source']:10} wrong {row['wrong_tasks']:>6}  "
             f"other {row['other_tasks']:>7}  nodes {row['nodes']}"
+        )
+    print("\nSources at medium or high (shown = flags left after the per-result limit):")
+    for row in source_table(tasks, findings, shown, args.wrong_below):
+        print(
+            f"  {row['source']:28} wrong {row['wrong_tasks']:>6}  "
+            f"other {row['other_tasks']:>7}  nodes {row['nodes']:<5} shown {row['shown']}"
         )
     if args.details:
         for task in tasks:
@@ -252,9 +328,13 @@ def main(argv: list[str] | None = None) -> None:
     baselines = args.cache / "baselines"
     current = snapshot(findings)
     if args.compare:
-        old = json.loads((baselines / f"{args.compare}.json").read_text(encoding="utf-8"))
-        changes = diff(old, current)
+        path = baselines / f"{args.compare}.json"
+        old = read_baseline(json.loads(path.read_text(encoding="utf-8")))
+        changes = diff(old["tasks"], current["tasks"])
         print(f"\nChanges against {args.compare}: {len(changes)} tasks")
+        sources = {**old["sources"], **current["sources"]}
+        for source, counts in source_changes(changes, sources).items():
+            print(f"  source {source:21} +{counts['gained']} -{counts['lost']}")
         for key, change in changes.items():
             gained, lost = len(change["gained"]), len(change["lost"])
             print(f"  {key[:17]} +{gained} -{lost}")

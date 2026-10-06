@@ -158,6 +158,33 @@ uv run python scripts/replay_flags.py --save before    # запомнить ре
 uv run python scripts/replay_flags.py --compare before # что изменилось после правки правил
 ```
 
+Таблицы и `--compare` разбивают результат по источникам знаний: для каждого
+источника видно, на скольких подозрительных и прочих задачах он дал `medium`
+или `high`, сколько его флагов дошло бы до модели после лимита на ответ
+(`shown`) и сколько находок он добавил или убрал против базовой линии. Новый
+источник сливаем только после такого сравнения:
+
+```bash
+git switch main && uv run python scripts/replay_flags.py --save main
+git switch <ветка> && uv run python scripts/replay_flags.py --compare main
+```
+
+Базовые линии, сохранённые до разбивки по источникам, тоже читаются: правило,
+которого нет ни в одной из двух линий, попадает в источник `?`.
+
+### Пакеты знаний
+
+Снимки собираются скриптами и коммитятся, сеть нужна только при сборке:
+
+```bash
+uv run python scripts/build_lolbas_pack.py                      # скачать и собрать
+uv run python scripts/build_lolbas_pack.py --input lolbas.json  # из скачанного файла
+```
+
+Новый источник: скрипт `scripts/build_<имя>_pack.py`, запись в
+`src/sibyl_h0und/knowledge/NOTICE`, правило (обычно `LookupRule`) в своём
+модуле и в `DEFAULT_RULES`, сравнение в `replay_flags.py --compare`.
+
 Рантайм не говорит, был ли вердикт верным, поэтому «подозрительной» считаем
 задачу с `quality_score` ниже `--wrong-below` (по умолчанию 0.2). Это
 эвристика, порог подбираем по трейсам. Задачи разных run'ов считаются

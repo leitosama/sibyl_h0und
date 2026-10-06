@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sibyl_h0und.flags import Attribute, Properties, ScoreRule
+from sibyl_h0und.normalize import program_name, windows_path
 
 FILE_TYPES = frozenset({"windows_file", "archive_file", "powershell_script"})
 PROCESS_TYPES = frozenset({"windows_process"})
@@ -78,11 +79,9 @@ _PLACES = (
 
 
 def _windows_path(value: Any) -> str | None:
-    """Normalize a Windows path, or return `None` for anything else."""
-    if not isinstance(value, str):
-        return None
-    path = value.strip().replace("/", "\\").lower()
-    if re.match(r"^([a-z]:\\|\\\\)", path):
+    """Normalize an absolute Windows path, or return `None` for anything else."""
+    path = windows_path(value)
+    if path is not None and re.match(r"^([a-z]:\\|\\\\)", path):
         return path
     return None
 
@@ -108,9 +107,9 @@ def location_rating(value: Any, *, executed: bool) -> int | None:
 
 def form_rating(value: Any) -> int | None:
     """Rate the file extension of a path, or return `None` if the sheet is silent."""
-    if not isinstance(value, str):
+    name = program_name(value, exe=False)
+    if name is None:
         return None
-    name = value.replace("/", "\\").rsplit("\\", 1)[-1].lower()
     extension = "." + name.rsplit(".", 1)[-1] if "." in name else ""
     if extension in HIGHLY_RELEVANT_EXTENSIONS:
         return 2
@@ -145,6 +144,7 @@ NEXTRON_FILE = ScoreRule(
     ),
     medium_at=3,
     high_at=4,
+    source="nextron",
 )
 
 
@@ -167,6 +167,7 @@ NEXTRON_PROCESS = ScoreRule(
     # fired on most benign tasks as often as on wrong ones.
     medium_at=2,
     high_at=2,
+    source="nextron",
 )
 
 NEXTRON_RULES = (NEXTRON_FILE, NEXTRON_PROCESS)

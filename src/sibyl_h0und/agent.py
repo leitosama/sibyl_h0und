@@ -13,7 +13,7 @@ from bluesec1_client import (
     TaskResult,
     ToolCallResult,
 )
-from sibyl_h0und.flags import LOW, FlagBoard
+from sibyl_h0und.flags import FlagBoard, flag_feedback
 from sibyl_h0und.ledger import GraphLedger
 from sibyl_h0und.llm import StructuredStepClient, render_json
 from sibyl_h0und.rules import DEFAULT_RULES
@@ -268,7 +268,7 @@ class SimpleSGRAgent:
                             tool=tool_name,
                             payload={"findings": [asdict(finding) for finding in fresh]},
                         )
-                    if shown := [item.as_feedback() for item in fresh if item.level != LOW]:
+                    if shown := flag_feedback(fresh):
                         feedback = {**feedback, "flags": shown}
 
             messages.append(
