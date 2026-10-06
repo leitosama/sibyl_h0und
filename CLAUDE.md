@@ -56,6 +56,9 @@ Each rule points to the ADR that explains it.
   `tests/fixtures/`. (ADR 0002, 0008)
 - Code, comments and commit messages in English; docs in `docs/` in Russian.
 - Work in a branch and open a PR to `main`.
+- Before opening a PR, run `/code-review` if code was written and the
+  `test-audit` skill if tests were written or changed. Fix every high and
+  medium score finding before the PR.
 
 ## Decisions
 
