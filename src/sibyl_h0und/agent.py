@@ -13,6 +13,8 @@ from bluesec1_client import (
     TaskResult,
     ToolCallResult,
 )
+from sibyl_h0und.budget import DEFAULT_MAX_RUNTIME_CALLS, CallBudget
+from sibyl_h0und.catalog import FINISH_TOOL, ToolCatalog
 from sibyl_h0und.flags import FlagBoard, flag_feedback
 from sibyl_h0und.ledger import GraphLedger
 from sibyl_h0und.llm import StructuredStepClient, render_json
@@ -43,7 +45,8 @@ Investigation rules:
 - Use only entity_id values actually returned by the alert or by a tool.
 - Submit only response artifacts supported by evidence. Do not invent entity ids.
 - Keep current_state evidence-focused and the remaining plan short.
-- Finish before the investigation step budget is exhausted.
+- When told that only finish_investigation remains, submit the verdict at once
+  from the evidence already gathered.
 """.strip()
 
 
@@ -65,25 +68,25 @@ class SimpleSGRAgent:
         self,
         llm: StructuredStepClient,
         *,
-        max_steps: int = 100,
+        max_runtime_calls: int = DEFAULT_MAX_RUNTIME_CALLS,
         trace_dir: Path | None = None,
         trace_metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Store the LLM dependency and per-task step limit.
+        """Store the LLM dependency and the per-task safety ceiling.
 
         Args:
             llm: Structured step generator used for every investigation turn.
-            max_steps: Maximum total tool calls allowed for one task.
+            max_runtime_calls: Ceiling on runtime calls per task, the report
+                included. It must stay below the runtime's own limit of 100.
             trace_dir: Root directory for run traces, or `None` to disable tracing.
             trace_metadata: Non-secret run settings stored in every `task_start` event.
 
         Raises:
-            ValueError: If the configured limit is not positive.
+            ValueError: If the ceiling leaves no room below the runtime's limit.
         """
-        if max_steps < 1:
-            raise ValueError("max_steps must be positive")
+        CallBudget(max_runtime_calls)
         self.llm = llm
-        self.max_steps = max_steps
+        self.max_runtime_calls = max_runtime_calls
         self.trace_dir = trace_dir
         self.trace_metadata = dict(trace_metadata or {})
 
@@ -155,22 +158,19 @@ class SimpleSGRAgent:
 
         Raises:
             ValueError: If the task observation has an invalid tool catalog.
-            RuntimeError: If the agent exhausts its step budget.
+            CallBudgetExhaustedError: If no report is accepted within the safety limits.
         """
         trace = trace or TaskTrace(None)
         observation = session.task.observation
+        catalog = ToolCatalog.from_observation(observation)
         trace.event(
             "task_start",
-            payload={"run": self.trace_metadata, "task": session.task.model_dump(mode="json")},
+            payload={
+                "run": self.trace_metadata,
+                "task": session.task.model_dump(mode="json"),
+                "step_format": catalog.response_format(),
+            },
         )
-        tool_specs = self._tool_specs(observation)
-        available_tools = {
-            specification["name"]
-            for specification in tool_specs
-            if isinstance(specification.get("name"), str)
-        }
-        if "finish_investigation" not in available_tools:
-            raise ValueError("The runtime did not advertise finish_investigation.")
 
         initial_observation = {
             key: _decode_json(value)
@@ -180,6 +180,7 @@ class SimpleSGRAgent:
         ledger = GraphLedger()
         ledger.observe_alert(initial_observation)
         flag_board = FlagBoard(DEFAULT_RULES)
+        budget = CallBudget(self.max_runtime_calls)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
@@ -188,24 +189,42 @@ class SimpleSGRAgent:
                     {
                         "instruction": "Investigate this alert and submit the correct response.",
                         "initial_observation": initial_observation,
-                        "available_tools": tool_specs,
+                        "available_tools": catalog.specs,
                     }
                 ),
             },
         ]
 
-        for step_index in range(1, self.max_steps + 1):
-            trace.step = step_index
-            step = await self.llm.next_step(messages, trace=trace)
-            tool_name = step.function.tool
-            arguments = step.function.model_dump(
-                mode="json",
-                by_alias=True,
-                exclude={"tool"},
-                exclude_none=True,
+        while True:
+            trace.step += 1
+            finish_only = budget.start_turn()
+            if finish_only and budget.finish_turns == 1:
+                logger.warning("Only finish_investigation remains: {}.", budget.finish_reason)
+                trace.event(
+                    "finish_only",
+                    payload={
+                        "reason": budget.finish_reason,
+                        "runtime_calls": budget.runtime_calls,
+                    },
+                )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Only {FINISH_TOOL} remains: {budget.finish_reason}. "
+                            "Submit the verdict now from the evidence already gathered."
+                        ),
+                    }
+                )
+            step = await self.llm.next_step(
+                messages,
+                response_format=catalog.response_format([FINISH_TOOL] if finish_only else None),
+                trace=trace,
             )
+            tool_name = step.function.tool
+            arguments = step.function.arguments
             trace.event("step", tool=tool_name, payload={"step": step.model_dump(mode="json")})
-            tool_call_id = f"step_{step_index}"
+            tool_call_id = f"step_{trace.step}"
             messages.append(
                 {
                     "role": "assistant",
@@ -223,18 +242,20 @@ class SimpleSGRAgent:
                 }
             )
 
-            if tool_name not in available_tools:
+            if tool_name not in catalog or (finish_only and tool_name != FINISH_TOOL):
+                allowed = [FINISH_TOOL] if finish_only else catalog.names
                 feedback: dict[str, Any] = {
                     "status": "error",
                     "message": (
-                        f"Tool {tool_name!r} is not advertised for this task. "
-                        f"Available tools: {sorted(available_tools)}"
+                        f"Tool {tool_name!r} cannot be called now. Available tools: {allowed}"
                     ),
                 }
+                budget.record_local_answer()
                 logger.warning("Rejected unavailable tool {} locally.", tool_name)
                 trace.event("tool_rejected", tool=tool_name, payload={"arguments": arguments})
             elif (decision := ledger.check(tool_name, arguments)).feedback is not None:
                 feedback = decision.feedback
+                budget.record_local_answer()
                 logger.warning("Answered {} locally: {}.", tool_name, decision.reason)
                 trace.event(
                     f"tool_{decision.reason}",
@@ -242,6 +263,7 @@ class SimpleSGRAgent:
                     payload={"arguments": arguments, "feedback": feedback},
                 )
             else:
+                budget.record_runtime_call()
                 response = await self._call_tool(session, trace, tool_name, arguments)
                 feedback = self._tool_feedback(response)
                 logger.info(
@@ -278,10 +300,6 @@ class SimpleSGRAgent:
                     "tool_call_id": tool_call_id,
                 }
             )
-
-        raise RuntimeError(
-            f"Agent hit the {self.max_steps}-step limit without finish_investigation."
-        )
 
     @staticmethod
     async def _call_tool(
@@ -346,32 +364,6 @@ class SimpleSGRAgent:
             error=error_message,
             payload={"task_result": task_result.model_dump(mode="json")},
         )
-
-    @staticmethod
-    def _tool_specs(observation: dict[str, Any]) -> list[dict[str, Any]]:
-        """Decode the runtime tool catalog from the current observation.
-
-        Args:
-            observation: Current public task observation.
-
-        Returns:
-            Advertised tool specifications.
-
-        Raises:
-            ValueError: If `available_tools` is absent or malformed.
-        """
-        raw_tool_specs = observation.get("available_tools")
-        if not isinstance(raw_tool_specs, str):
-            raise ValueError("Observation has no JSON-encoded available_tools field.")
-        try:
-            tool_specs = json.loads(raw_tool_specs)
-        except json.JSONDecodeError as exc:
-            raise ValueError("available_tools is not valid JSON.") from exc
-        if not isinstance(tool_specs, list) or not all(
-            isinstance(specification, dict) for specification in tool_specs
-        ):
-            raise ValueError("available_tools must encode a list of tool specifications.")
-        return [dict(specification) for specification in tool_specs]
 
     @staticmethod
     def _tool_feedback(response: ToolCallResult) -> dict[str, Any]:

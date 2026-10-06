@@ -19,7 +19,16 @@ def test_env_example_contains_complete_runnable_configuration() -> None:
     assert settings.llm_base_url == "https://provider.example/v1"
     assert settings.llm_api_key.get_secret_value() == "replace-with-your-key"
     assert settings.llm_default_model == "provider/model-name"
-    assert settings.agent_max_steps == 100
+    assert settings.agent_max_runtime_calls == 95
+
+
+def test_runtime_call_ceiling_must_stay_below_the_runtime_limit(monkeypatch) -> None:
+    """A ceiling of 100 would let the runtime end a task before the report."""
+    env_example = Path(__file__).resolve().parents[1] / ".env.example"
+    monkeypatch.setenv("BLUESEC_AGENT_MAX_RUNTIME_CALLS", "100")
+
+    with pytest.raises(ValueError):
+        Settings(_env_file=env_example)
 
 
 def test_missing_configuration_is_reported_without_traceback(monkeypatch, capsys):

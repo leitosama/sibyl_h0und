@@ -3,6 +3,7 @@ from pathlib import Path
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from sibyl_h0und.budget import DEFAULT_MAX_RUNTIME_CALLS, RUNTIME_CALL_LIMIT
 from sibyl_h0und.trace import default_trace_dir
 
 _ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
@@ -68,11 +69,13 @@ class Settings(BaseSettings):
         ge=1,
         le=5,
     )
-    agent_max_steps: int = Field(
-        default=100,
-        validation_alias="BLUESEC_AGENT_MAX_STEPS",
-        ge=1,
-        le=100,
+    # Safety ceiling on runtime calls per task, the report included. It stays
+    # below the runtime's own limit of 100 calls (ADR 0004, 0015).
+    agent_max_runtime_calls: int = Field(
+        default=DEFAULT_MAX_RUNTIME_CALLS,
+        validation_alias="BLUESEC_AGENT_MAX_RUNTIME_CALLS",
+        ge=2,
+        lt=RUNTIME_CALL_LIMIT,
     )
     trace_enabled: bool = Field(default=True, validation_alias="TRACE_ENABLED")
     trace_dir: Path = Field(default_factory=default_trace_dir, validation_alias="TRACE_DIR")

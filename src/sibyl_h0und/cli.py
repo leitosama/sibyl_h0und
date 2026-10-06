@@ -81,7 +81,7 @@ async def run(args: argparse.Namespace) -> None:
     ):
         result = await SimpleSGRAgent(
             llm,
-            max_steps=settings.agent_max_steps,
+            max_runtime_calls=settings.agent_max_runtime_calls,
             trace_dir=settings.trace_dir.expanduser() if settings.trace_enabled else None,
             trace_metadata={
                 "agent_name": agent_name,
@@ -91,7 +91,7 @@ async def run(args: argparse.Namespace) -> None:
                 "model": settings.llm_default_model,
                 "llm_max_completion_tokens": settings.llm_max_completion_tokens,
                 "llm_max_step_retries": settings.llm_max_step_retries,
-                "agent_max_steps": settings.agent_max_steps,
+                "agent_max_runtime_calls": settings.agent_max_runtime_calls,
             },
         ).run(client)
 

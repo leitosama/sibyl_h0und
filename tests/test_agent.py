@@ -12,15 +12,7 @@ from bluesec1_client import (
     ToolCallResult,
 )
 from sibyl_h0und.agent import SimpleSGRAgent
-from sibyl_h0und.models import (
-    BenignFinishInvestigationSubmission,
-    FinishInvestigationArtifact,
-    FinishInvestigationEntityEvidence,
-    FinishInvestigationRequest,
-    GetEntityRequest,
-    MaliciousFinishInvestigationSubmission,
-    NextStep,
-)
+from sibyl_h0und.models import NextStep
 from sibyl_h0und.trace import TaskTrace
 
 # A catalog entry with a marker that shows where the catalog reaches the LLM.
@@ -43,23 +35,27 @@ class FakeStepClient:
         """
         self.steps = list(steps)
         self.requests: list[list[dict[str, Any]]] = []
+        self.formats: list[dict[str, Any]] = []
 
     async def next_step(
         self,
         messages: list[dict[str, Any]],
         *,
+        response_format: dict[str, Any],
         trace: TaskTrace | None = None,
     ) -> NextStep:
         """Record one conversation and return its next prepared step.
 
         Args:
             messages: Current LLM history.
+            response_format: Step schema of this turn.
             trace: Ignored task trace.
 
         Returns:
             Next prepared structured step.
         """
         self.requests.append([dict(message) for message in messages])
+        self.formats.append(response_format)
         return self.steps.pop(0)
 
 
@@ -164,37 +160,35 @@ class FakeClient:
         return cast(RemoteBenchmarkSession, session)
 
 
+def make_step(tool: str, **arguments: Any) -> NextStep:
+    """Build a step that calls one tool."""
+    return NextStep.model_validate(
+        {
+            "current_state": "Reading the graph.",
+            "plan_remaining_steps_brief": [f"Call {tool}."],
+            "task_completed": tool == "finish_investigation",
+            "function": {"tool": tool, **arguments},
+        }
+    )
+
+
+def get_entity_step(entity_id: str, reasoning: str = "Inspect the entity.") -> NextStep:
+    """Build a step that reads one entity."""
+    return make_step("get_entity", entity_id=entity_id, reasoning=reasoning)
+
+
+MALICIOUS_SUBMISSION = {
+    "verdict": "malicious",
+    "ir_artifacts": [{"entity_id": "entity-1", "kind": "host_to_isolate"}],
+    "reasoning": "The alert process is part of a suspicious process chain.",
+}
+
+
 def investigation_steps() -> list[NextStep]:
     """Build one evidence step followed by the terminal verdict."""
     return [
-        NextStep(
-            current_state="Alert identifies process 42 on host-1.",
-            plan_remaining_steps_brief=["Inspect its process ancestry and descendants."],
-            task_completed=False,
-            function=GetEntityRequest(
-                tool="get_entity",
-                entity_id="entity-1",
-                reasoning="Inspect the alert entity.",
-            ),
-        ),
-        NextStep(
-            current_state="The suspicious process is confirmed on host-1.",
-            plan_remaining_steps_brief=["Submit the evidence-backed malicious verdict."],
-            task_completed=True,
-            function=FinishInvestigationRequest(
-                tool="finish_investigation",
-                submission=MaliciousFinishInvestigationSubmission(
-                    verdict="malicious",
-                    ir_artifacts=[
-                        FinishInvestigationArtifact(
-                            entity_id="entity-1",
-                            kind="host_to_isolate",
-                        )
-                    ],
-                    reasoning="The alert process is part of a suspicious process chain.",
-                ),
-            ),
-        ),
+        get_entity_step("entity-1", reasoning="Inspect the alert entity."),
+        make_step("finish_investigation", submission=MALICIOUS_SUBMISSION),
     ]
 
 
@@ -222,13 +216,7 @@ def test_agent_executes_fresh_structured_task_via_remote_session(tmp_path: Path)
         "entity_id": "entity-1",
         "reasoning": "Inspect the alert entity.",
     }
-    assert session.calls[1][1] == {
-        "submission": {
-            "verdict": "malicious",
-            "ir_artifacts": [{"entity_id": "entity-1", "kind": "host_to_isolate"}],
-            "reasoning": "The alert process is part of a suspicious process chain.",
-        }
-    }
+    assert session.calls[1][1] == {"submission": MALICIOUS_SUBMISSION}
     tool_message = llm.requests[1][-1]
     assert tool_message["role"] == "tool"
     assert json.loads(tool_message["content"]) == {
@@ -271,34 +259,17 @@ def test_trace_write_failure_does_not_break_the_run(tmp_path: Path) -> None:
     assert result.successful_tasks == 1
 
 
-def get_entity_step(entity_id: str, reasoning: str = "Inspect the entity.") -> NextStep:
-    """Build a step that reads one entity."""
-    return NextStep(
-        current_state="Reading the graph.",
-        plan_remaining_steps_brief=["Read the entity."],
-        task_completed=False,
-        function=GetEntityRequest(tool="get_entity", entity_id=entity_id, reasoning=reasoning),
-    )
-
-
 def benign_finish_step(entity_id: str, field: str) -> NextStep:
     """Build a benign verdict that cites one entity property."""
-    return NextStep(
-        current_state="The activity is legitimate.",
-        plan_remaining_steps_brief=["Submit the benign verdict."],
-        task_completed=True,
-        function=FinishInvestigationRequest(
-            tool="finish_investigation",
-            submission=BenignFinishInvestigationSubmission(
-                verdict="benign",
-                legitimacy_evidence=[
-                    FinishInvestigationEntityEvidence(
-                        anchor="entity", entity_id=entity_id, property_fields=[field]
-                    )
-                ],
-                reasoning="Signed vendor binary.",
-            ),
-        ),
+    return make_step(
+        "finish_investigation",
+        submission={
+            "verdict": "benign",
+            "legitimacy_evidence": [
+                {"anchor": "entity", "entity_id": entity_id, "property_fields": [field]}
+            ],
+            "reasoning": "Signed vendor binary.",
+        },
     )
 
 
@@ -378,3 +349,34 @@ def test_flags_reach_the_model_and_the_trace(tmp_path: Path) -> None:
     events = read_events(run_dir / "001_task-1.trace.jsonl")
     (flags_event,) = [event for event in events if event["kind"] == "flags"]
     assert flags_event["payload"]["findings"][0]["rule"] == "nextron_file"
+
+
+def test_agent_reserves_the_last_runtime_call_for_the_report(tmp_path: Path) -> None:
+    """At the ceiling the model is told to finish, and other tools no longer reach the runtime."""
+    llm = FakeStepClient(
+        [
+            get_entity_step("entity-invented"),
+            get_entity_step("entity-1"),
+            get_entity_step("entity-2"),
+            investigation_steps()[1],
+        ]
+    )
+    session = FakeSession()
+    agent = SimpleSGRAgent(llm, max_runtime_calls=2, trace_dir=tmp_path)
+
+    result = asyncio.run(agent.run(cast(RemoteBenchmarkClient, FakeClient(session))))
+
+    assert result.successful_tasks == 1
+    # The locally answered first turn did not use up the ceiling of two calls.
+    assert [name for name, _ in session.calls] == ["get_entity", "finish_investigation"]
+    notice = llm.requests[2][-1]
+    assert notice["role"] == "user"
+    assert "Only finish_investigation remains" in notice["content"]
+    finish_only = llm.formats[2]["json_schema"]["schema"]["properties"]["function"]["anyOf"]
+    assert [option["properties"]["tool"]["enum"] for option in finish_only] == [
+        ["finish_investigation"]
+    ]
+    assert "cannot be called now" in json.loads(llm.requests[3][-1]["content"])["message"]
+    (run_dir,) = tmp_path.iterdir()
+    kinds = [event["kind"] for event in read_events(run_dir / "001_task-1.trace.jsonl")]
+    assert kinds.count("finish_only") == 1
