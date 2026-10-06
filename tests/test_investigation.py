@@ -69,6 +69,30 @@ def test_only_the_report_is_allowed_when_finish_only() -> None:
     assert allowed == Send({"submission": REPORT})
 
 
+@pytest.mark.parametrize(
+    ("report", "missing"),
+    [
+        ({**REPORT, "reasoning": ""}, "reasoning"),
+        ({**REPORT, "reasoning": "Short test"}, "reasoning"),
+        ({**REPORT, "ir_artifacts": []}, "ir_artifacts"),
+        (
+            {"verdict": "benign", "legitimacy_evidence": [], "reasoning": REPORT["reasoning"]},
+            "legitimacy_evidence",
+        ),
+    ],
+)
+def test_a_report_that_says_nothing_is_refused_once(report: dict[str, Any], missing: str) -> None:
+    """The model gets one chance to redo a placeholder; the second report is sent as is."""
+    investigation = Investigation(observation())
+
+    refused = investigation.before_call(FINISH_TOOL, {"submission": report})
+    again = investigation.before_call(FINISH_TOOL, {"submission": report}, finish_only=True)
+
+    assert isinstance(refused, LocalAnswer)
+    assert missing in refused.feedback["message"]
+    assert again == Send({"submission": report})
+
+
 def test_a_catalog_without_the_report_tool_is_refused() -> None:
     """A task that cannot be finished is not started."""
     with pytest.raises(ValueError, match=FINISH_TOOL):
