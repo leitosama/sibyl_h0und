@@ -330,25 +330,25 @@ class DroppedFileSession(FakeSession):
 
 
 def test_flags_reach_the_model_and_the_trace(tmp_path: Path) -> None:
-    """A finding is shown once with the evidence it explains and is traced."""
+    """A finding reaches the model next to the evidence it explains and is traced.
+
+    What a rule rates and how it words the reason belong to test_flags; here
+    only the delivery is checked, so retuning a rule does not break this test.
+    """
     llm = FakeStepClient([get_entity_step("entity-1"), investigation_steps()[1]])
     agent = SimpleSGRAgent(llm, trace_dir=tmp_path)
 
     asyncio.run(agent.run(cast(RemoteBenchmarkClient, FakeClient(DroppedFileSession()))))
 
     feedback = json.loads(llm.requests[1][-1]["content"])
-    assert feedback["flags"] == [
-        {
-            "id": "entity-1",
-            "type": "windows_file",
-            "level": "high",
-            "why": "location=2 form=2 (score 4 of 4)",
-        }
-    ]
+    assert feedback["result"]["id"] == "entity-1"
+    (line,) = feedback["flags"]
+    assert (line["id"], line["type"]) == ("entity-1", "windows_file")
+    assert line["why"]
     (run_dir,) = tmp_path.iterdir()
     events = read_events(run_dir / "001_task-1.trace.jsonl")
     (flags_event,) = [event for event in events if event["kind"] == "flags"]
-    assert flags_event["payload"]["findings"][0]["rule"] == "nextron_file"
+    assert {finding["node_id"] for finding in flags_event["payload"]["findings"]} == {"entity-1"}
 
 
 def test_agent_reserves_the_last_runtime_call_for_the_report(tmp_path: Path) -> None:
