@@ -18,6 +18,8 @@ A query is one string. It is matched the same way whatever it is:
   `/usr/bin/find`);
 - an absolute Windows path or a file extension finds the rows of the Nextron
   antivirus cheat sheet;
+- a registry key path (`HKLM\\...`, `HKCU\\...`) finds the autostart locations of
+  ForensicArtifacts that are the key or one of its parents;
 - any words find the techniques, software and WTFBins entries that share them.
 """
 
@@ -29,7 +31,7 @@ from typing import Any
 
 from sibyl_h0und.knowledge import load_pack
 from sibyl_h0und.nextron import extension_row, location_row, user_row
-from sibyl_h0und.normalize import attack_id, domain, program_name, unix_program
+from sibyl_h0und.normalize import attack_id, domain, program_name, registry_path, unix_program
 
 KNOWLEDGE_TOOL = "lookup_knowledge"
 KNOWLEDGE_TOOL_SPEC: dict[str, Any] = {
@@ -38,9 +40,11 @@ KNOWLEDGE_TOOL_SPEC: dict[str, Any] = {
         "Look up a term in local security knowledge, with no cost to the investigation: "
         "MITRE ATT&CK techniques and software, LOLBAS and GTFOBins (abusable Windows and Unix "
         "binaries), GTFOArgs (abusable Unix arguments), LOLRMM remote management tools, "
-        "WTFBins benign programs that look suspicious, and the Nextron antivirus cheat sheet. "
-        "The query is an ATT&CK id (T1036.003, S0195), a file name or path, a domain, or words "
-        "describing behavior. Entries are returned as the sources state them, with no verdict."
+        "WTFBins benign programs that look suspicious, ForensicArtifacts Windows autostart "
+        "registry locations, and the Nextron antivirus cheat sheet. "
+        "The query is an ATT&CK id (T1036.003, S0195), a file name or path, a registry key "
+        "path, a domain, or words describing behavior. Entries are returned as the sources "
+        "state them, with no verdict."
     ),
     "parameters": {
         "type": "object",
@@ -127,6 +131,7 @@ class Vocabulary:
         self._wtfbins = load_pack("wtfbins")
         self._gtfobins = load_pack("gtfobins")
         self._gtfoargs = load_pack("gtfoargs")
+        self._autostart = load_pack("forensicartifacts_autostart")
         self._wtfbin_by_id = {doc["id"]: doc for doc in self._wtfbins.documents}
         self._gtfobins_notes = {doc["id"]: doc for doc in self._gtfobins.documents}
         self._users_of: dict[str, list[str]] = defaultdict(list)
@@ -161,7 +166,8 @@ class Vocabulary:
         matches: list[dict[str, Any]] = []
         if text:
             matches += self._by_id(text)
-            matches += self._by_program(text)
+            matches += self._by_registry(text)
+            matches += [] if registry_path(text) else self._by_program(text)
             matches += self._by_domain(text)
             matches += self._by_cheat_sheet(text)
             if self._is_description(text) or (not matches and _PLAIN_WORD.match(text)):
@@ -169,8 +175,8 @@ class Vocabulary:
         answer: dict[str, Any] = {"query": text, "matches": matches}
         if not matches:
             answer["note"] = (
-                "No entry in ATT&CK, LOLBAS, GTFOBins, GTFOArgs, LOLRMM, WTFBins or the Nextron "
-                "cheat sheet. "
+                "No entry in ATT&CK, LOLBAS, GTFOBins, GTFOArgs, LOLRMM, WTFBins, "
+                "ForensicArtifacts or the Nextron cheat sheet. "
                 "That says nothing about whether the term is benign or hostile."
             )
         return answer
@@ -283,6 +289,26 @@ class Vocabulary:
             )
         return found
 
+    def _by_registry(self, text: str) -> list[dict[str, Any]]:
+        """Find the autostart locations that are the queried registry key or its parents."""
+        if (path := registry_path(text)) is None:
+            return []
+        found = []
+        parts = path.split("\\")
+        for end in range(len(parts), 0, -1):
+            key = "\\".join(parts[:end])
+            if (entries := self._autostart.entries.get(key)) is not None:
+                found.append(
+                    {
+                        "source": "forensicartifacts",
+                        "kind": "autostart_location",
+                        "key": key,
+                        "queried": text,
+                        "artifacts": entries,
+                    }
+                )
+        return found
+
     def _by_domain(self, text: str) -> list[dict[str, Any]]:
         """Find the RMM tool of a domain or of one of its parent domains."""
         if (host := domain(text)) is None:
@@ -314,7 +340,9 @@ class Vocabulary:
     @staticmethod
     def _is_description(text: str) -> bool:
         """Tell whether a query is words, not an id, a path, a SID, a domain or a file name."""
-        structured = attack_id(text) or _ABSOLUTE_PATH.match(text) or _SID.match(text)
+        structured = (
+            attack_id(text) or _ABSOLUTE_PATH.match(text) or _SID.match(text) or registry_path(text)
+        )
         return not structured and " " in text.strip()
 
     def _by_words(self, text: str, already: list[dict[str, Any]]) -> list[dict[str, Any]]:

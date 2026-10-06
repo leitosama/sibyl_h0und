@@ -47,3 +47,11 @@ gtfoargs.json
   Licence: GNU General Public License v3.0
   Use: program names, abuse functions and one example argument line each,
   reduced by scripts/build_gtfoargs_pack.py.
+
+forensicartifacts_autostart.json
+  Source: ForensicArtifacts, https://forensicartifacts.com/
+  Repository: https://github.com/ForensicArtifacts/artifacts
+  Licence: Apache License 2.0
+  Use: Windows registry keys and values of the persistence and services artifacts,
+  with each artifact's name, the opening of its description and its source URLs,
+  reduced by scripts/build_forensicartifacts_pack.py.

@@ -39,6 +39,40 @@ def windows_path(value: Any) -> str | None:
     return "\\" + path if unc else path
 
 
+_HIVES = {
+    "hklm": "hkey_local_machine",
+    "hkcu": "hkey_current_user",
+    "hkcr": "hkey_classes_root",
+    "hku": "hkey_users",
+}
+_USER_HIVE = re.compile(r"^hkey_users\\(?:s-1-[\d-]+|%%users\.sid%%|\.default)(?=\\|$)")
+_CONTROL_SET = re.compile(r"\\controlset\d+(?=\\|$)")
+
+
+def registry_path(value: Any) -> str | None:
+    """Lower-case a registry key path in one form, or return `None` for a non-path.
+
+    The hive is spelled out (`HKLM` is `hkey_local_machine`), a user's hive
+    (`HKEY_USERS\\<sid>`) is `hkey_current_user`, `ControlSet001` is
+    `CurrentControlSet`, and a trailing `\\*` or separator is dropped.
+    """
+    if not isinstance(value, str) or not (path := value.strip().strip('"').strip()):
+        return None
+    path = re.sub(r"\\{2,}", r"\\", path.replace("/", "\\").lower()).rstrip("\\")
+    path = path.removesuffix("\\*").rstrip("\\")
+    # The kernel spelling `\REGISTRY\MACHINE\...` names the same hives.
+    path = re.sub(
+        r"^\\registry\\(machine|user)(?=\\|$)",
+        lambda m: "hkey_local_machine" if m.group(1) == "machine" else "hkey_users",
+        path,
+    )
+    head, separator, rest = path.partition("\\")
+    path = _HIVES.get(head, head) + separator + rest
+    path = _USER_HIVE.sub("hkey_current_user", path)
+    path = _CONTROL_SET.sub(r"\\currentcontrolset", path)
+    return path if path.startswith("hkey_") else None
+
+
 def program_name(
     value: Any, *, aliases: Mapping[str, str] | None = None, exe: bool = True
 ) -> str | None:
@@ -233,6 +267,7 @@ def attack_id(value: Any) -> str | None:
 KEY_NORMALIZERS: dict[str, Callable[[Any], str | None]] = {
     "program": program_name,
     "path": windows_path,
+    "registry": registry_path,
     "domain": domain,
     "attack_id": attack_id,
     "unix_program": unix_program,

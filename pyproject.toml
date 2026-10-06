@@ -31,6 +31,7 @@ packages = ["src/bluesec1_client", "src/sibyl_h0und"]
 dev = [
     "grpcio-tools>=1.83,<2",
     "pytest>=8,<10",
+    "pyyaml>=6,<7",
     "ruff>=0.9,<1",
 ]
 

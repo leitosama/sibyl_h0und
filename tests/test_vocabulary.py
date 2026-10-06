@@ -134,3 +134,40 @@ def test_cheat_sheet_rates_a_windows_directory_as_the_sheet_does_for_a_flagged_f
     assert extension_row("notes.txt")["rating"] == "highly relevant"
     assert extension_row("tool.exe") is None
     assert user_row("S-1-5-21-1-2-3-1001")["account"] == "standard user"
+
+
+def test_a_registry_value_path_finds_the_autostart_key_that_holds_it() -> None:
+    """The match is on the key or a parent, whatever the hive spelling or value name."""
+    for query in (
+        "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\GoogleUpdate",
+        "HKEY_USERS\\S-1-5-21-1-2-3-1001\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+    ):
+        (match, *_) = shared().lookup(query)["matches"]
+
+        assert (match["source"], match["kind"]) == ("forensicartifacts", "autostart_location")
+        assert [item["artifact"] for item in match["artifacts"]] == ["WindowsRunKeys"]
+
+
+def test_a_service_key_finds_the_services_location() -> None:
+    answer = shared().lookup("HKLM\\System\\ControlSet001\\Services\\PSEXESVC")
+
+    assert [item["artifact"] for item in answer["matches"][0]["artifacts"]] == ["WindowsServices"]
+
+
+def test_a_key_with_no_autostart_entry_gets_no_answer_and_no_verdict() -> None:
+    """Application settings are not in the source, and the answer says nothing about safety."""
+    answer = shared().lookup("HKLM\\Software\\Vendor\\App\\Settings")
+
+    assert answer["matches"] == []
+    assert "nothing about whether" in answer["note"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "C:\\AzAgent\\_work\\1\\s\\build.exe",
+        "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\a.lnk",
+    ],
+)
+def test_benign_build_and_programdata_paths_get_no_autostart_entry(query: str) -> None:
+    assert "forensicartifacts" not in sources(shared().lookup(query))

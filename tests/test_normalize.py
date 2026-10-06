@@ -2,7 +2,7 @@ import base64
 
 import pytest
 
-from sibyl_h0und.normalize import command_line, domain, program_name, windows_path
+from sibyl_h0und.normalize import command_line, domain, program_name, registry_path, windows_path
 
 
 @pytest.mark.parametrize(
@@ -93,3 +93,28 @@ def test_encoded_command_of_another_program_is_not_decoded() -> None:
 def test_domain_extracts_the_host_name(value: str, expected: str | None) -> None:
     """URLs, e-mail addresses and FQDNs reduce to one host key; IPs are not domains."""
     assert domain(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("HKLM\\Software\\Run", "hkey_local_machine\\software\\run"),
+        ("HKEY_LOCAL_MACHINE\\Software\\Run\\*", "hkey_local_machine\\software\\run"),
+        ("HKCU\\Software\\Run", "hkey_current_user\\software\\run"),
+        ("HKU\\S-1-5-21-1-2-3-1001\\Software\\Run", "hkey_current_user\\software\\run"),
+        ("HKEY_USERS\\%%users.sid%%\\Software\\Run", "hkey_current_user\\software\\run"),
+        ("HKEY_USERS", "hkey_users"),
+        (
+            "HKLM\\System\\ControlSet002\\Services\\x",
+            "hkey_local_machine\\system\\currentcontrolset\\services\\x",
+        ),
+        ("\\REGISTRY\\MACHINE\\SOFTWARE\\a", "hkey_local_machine\\software\\a"),
+        ("C:\\Windows\\a.exe", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_registry_path_gives_one_form_for_the_spellings_of_a_key(
+    value: object, expected: str | None
+) -> None:
+    assert registry_path(value) == expected

@@ -8,6 +8,7 @@ from sibyl_h0und.knowledge import PackError, load_pack, pack_names, read_pack
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 from build_attack_pack import build as build_attack  # noqa: E402
+from build_forensicartifacts_pack import build as build_autostart  # noqa: E402
 from build_gtfoargs_pack import build as build_gtfoargs  # noqa: E402
 from build_gtfobins_pack import build as build_gtfobins  # noqa: E402
 from build_lolbas_pack import build  # noqa: E402
@@ -232,3 +233,49 @@ def test_gtfoargs_build_reads_a_section_per_program(tmp_path: Path) -> None:
         "url": "https://gtfoargs.github.io/gtfoargs/curl/",
     }
     assert pack.lookup("function types") is None
+
+
+AUTOSTART_YAML = """
+name: WindowsPersistenceRegistryKeys
+sources:
+- {type: ARTIFACT_GROUP, attributes: {names: [Group]}}
+---
+name: Group
+sources:
+- {type: ARTIFACT_GROUP, attributes: {names: [RunKeys, Winlogon, ClassesShell]}}
+---
+name: RunKeys
+doc: Run keys.
+urls: ['https://example.test/run']
+sources:
+- type: REGISTRY_KEY
+  attributes: {keys: ['HKEY_USERS\\%%users.sid%%\\Software\\Run\\*']}
+---
+name: Winlogon
+sources:
+- type: REGISTRY_VALUE
+  attributes:
+    key_value_pairs: [{key: 'HKEY_LOCAL_MACHINE\\Software\\Winlogon', value: 'Shell'}]
+---
+name: ClassesShell
+sources:
+- type: REGISTRY_KEY
+  attributes: {keys: ['HKEY_LOCAL_MACHINE\\Software\\Classes\\*\\shell']}
+---
+name: Unlisted
+sources:
+- type: REGISTRY_KEY
+  attributes: {keys: ['HKEY_LOCAL_MACHINE\\Software\\Other']}
+"""
+
+
+def test_autostart_build_follows_groups_and_keeps_only_matchable_keys(tmp_path: Path) -> None:
+    """Artifacts outside the root group and keys with a mid-path wildcard are left out."""
+    pack = read_pack(write(tmp_path / "a.json", build_autostart(AUTOSTART_YAML, "x")))
+
+    assert pack.lookup("HKCU\\Software\\Run") == [
+        {"artifact": "RunKeys", "summary": "Run keys.", "urls": ["https://example.test/run"]}
+    ]
+    assert pack.lookup("HKLM\\Software\\Winlogon")[0]["value"] == "Shell"
+    assert pack.lookup("HKLM\\Software\\Other") is None
+    assert len(pack.entries) == 2

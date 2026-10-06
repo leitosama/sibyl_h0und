@@ -41,6 +41,8 @@ DEFAULT_WRONG_BELOW = 0.2
 Task = dict[str, Any]
 # Node properties whose value is a term worth asking the vocabulary about.
 TERM_PROPERTIES = ("image_path", "original_filename", "parent_image", "fqdn")
+# Node types whose `path` is a registry key, not a file.
+REGISTRY_TYPE = "registry_key"
 
 
 def task_key(task: Task) -> str:
@@ -133,7 +135,8 @@ def terms(task: Task) -> set[str]:
     for result in task_results(task):
         for node in nodes(result):
             properties = node.get("properties")
-            for name in TERM_PROPERTIES if isinstance(properties, dict) else ():
+            names = (*TERM_PROPERTIES, *(("path",) if node["type"] == REGISTRY_TYPE else ()))
+            for name in names if isinstance(properties, dict) else ():
                 if isinstance(value := properties.get(name), str) and value:
                     found.add(value)
     return found
