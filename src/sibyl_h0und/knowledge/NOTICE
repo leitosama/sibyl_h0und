@@ -1,0 +1,9 @@
+Knowledge packs in this directory are derived from third-party sources.
+Each pack file records its source, URL, version, retrieval date and licence.
+
+lolbas.json
+  Source: LOLBAS Project, https://lolbas-project.github.io/
+  Repository: https://github.com/LOLBAS-Project/LOLBAS
+  Licence: GNU General Public License v3.0
+  Use: binary names, the categories of their documented commands and MITRE
+  ATT&CK technique ids, reduced by scripts/build_lolbas_pack.py.
