@@ -1,6 +1,4 @@
-import json
 import time
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -14,11 +12,10 @@ from bluesec1_client import (
     ToolCallResult,
 )
 from sibyl_h0und.budget import DEFAULT_MAX_RUNTIME_CALLS, CallBudget
-from sibyl_h0und.catalog import FINISH_TOOL, ToolCatalog
-from sibyl_h0und.flags import FlagBoard, flag_feedback
-from sibyl_h0und.ledger import GraphLedger
+from sibyl_h0und.catalog import FINISH_TOOL
+from sibyl_h0und.investigation import Investigation, LocalAnswer
 from sibyl_h0und.llm import StructuredStepClient, render_json
-from sibyl_h0und.rules import DEFAULT_RULES
+from sibyl_h0und.outcome import ToolOutcome
 from sibyl_h0und.trace import TaskTrace, elapsed_ms, run_trace_dir, task_trace_path
 
 SYSTEM_PROMPT = """
@@ -129,7 +126,7 @@ class SimpleSGRAgent:
                 error_message = f"{type(exc).__name__}: {exc}"[:2_000]
                 aborted_result = await session.abort_task(error_message=error_message)
                 task_result = TaskResult.model_validate(aborted_result)
-            self._trace_task_end(trace, task_result, error_message)
+            trace.task_end(task_result.model_dump(mode="json"), error_message)
             task_results.append(task_result)
 
         successful_tasks = sum(
@@ -161,52 +158,24 @@ class SimpleSGRAgent:
             CallBudgetExhaustedError: If no report is accepted within the safety limits.
         """
         trace = trace or TaskTrace(None)
-        observation = session.task.observation
-        catalog = ToolCatalog.from_observation(observation)
-        trace.event(
-            "task_start",
-            payload={
-                "run": self.trace_metadata,
-                "task": session.task.model_dump(mode="json"),
-                "step_format": catalog.response_format(),
-            },
+        investigation = Investigation(session.task.observation, trace)
+        trace.task_start(
+            self.trace_metadata,
+            session.task.model_dump(mode="json"),
+            investigation.catalog.response_format(),
         )
-
-        initial_observation = {
-            key: _decode_json(value)
-            for key, value in observation.items()
-            if key not in {"available_tools", "last_tool_result"}
-        }
-        ledger = GraphLedger()
-        ledger.observe_alert(initial_observation)
-        flag_board = FlagBoard(DEFAULT_RULES)
         budget = CallBudget(self.max_runtime_calls)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": render_json(
-                    {
-                        "instruction": "Investigate this alert and submit the correct response.",
-                        "initial_observation": initial_observation,
-                        "available_tools": catalog.specs,
-                    }
-                ),
-            },
+            investigation.opening_message(),
         ]
 
         while True:
-            trace.step += 1
+            step_number = trace.next_step()
             finish_only = budget.start_turn()
             if finish_only and budget.finish_turns == 1:
                 logger.warning("Only finish_investigation remains: {}.", budget.finish_reason)
-                trace.event(
-                    "finish_only",
-                    payload={
-                        "reason": budget.finish_reason,
-                        "runtime_calls": budget.runtime_calls,
-                    },
-                )
+                trace.finish_only(budget.finish_reason, budget.runtime_calls)
                 messages.append(
                     {
                         "role": "user",
@@ -218,13 +187,14 @@ class SimpleSGRAgent:
                 )
             step = await self.llm.next_step(
                 messages,
-                response_format=catalog.response_format([FINISH_TOOL] if finish_only else None),
+                response_format=investigation.catalog.response_format(
+                    [FINISH_TOOL] if finish_only else None
+                ),
                 trace=trace,
             )
             tool_name = step.function.tool
-            arguments = step.function.arguments
-            trace.event("step", tool=tool_name, payload={"step": step.model_dump(mode="json")})
-            tool_call_id = f"step_{trace.step}"
+            trace.step_chosen(tool_name, step.model_dump(mode="json"))
+            tool_call_id = f"step_{step_number}"
             messages.append(
                 {
                     "role": "assistant",
@@ -235,79 +205,31 @@ class SimpleSGRAgent:
                             "id": tool_call_id,
                             "function": {
                                 "name": tool_name,
-                                "arguments": render_json(arguments),
+                                "arguments": render_json(step.function.arguments),
                             },
                         }
                     ],
                 }
             )
 
-            problem = None
-            if tool_name in catalog:
-                try:
-                    arguments = catalog.prepare(tool_name, arguments)
-                except ValueError as exc:
-                    problem = str(exc)
-
-            if tool_name not in catalog or (finish_only and tool_name != FINISH_TOOL):
-                allowed = [FINISH_TOOL] if finish_only else catalog.names
-                feedback: dict[str, Any] = {
-                    "status": "error",
-                    "message": (
-                        f"Tool {tool_name!r} cannot be called now. Available tools: {allowed}"
-                    ),
-                }
+            decision = investigation.before_call(
+                tool_name, step.function.arguments, finish_only=finish_only
+            )
+            if isinstance(decision, LocalAnswer):
                 budget.record_local_answer()
-                logger.warning("Rejected unavailable tool {} locally.", tool_name)
-                trace.event("tool_rejected", tool=tool_name, payload={"arguments": arguments})
-            elif problem is not None:
-                feedback = {"status": "error", "message": f"Not sent to the runtime: {problem}"}
-                budget.record_local_answer()
-                logger.warning("Rejected invalid {} arguments locally: {}", tool_name, problem)
-                trace.event(
-                    "tool_invalid",
-                    tool=tool_name,
-                    payload={"arguments": arguments, "feedback": feedback},
-                )
-            elif (decision := ledger.check(tool_name, arguments)).feedback is not None:
                 feedback = decision.feedback
-                budget.record_local_answer()
-                logger.warning("Answered {} locally: {}.", tool_name, decision.reason)
-                trace.event(
-                    f"tool_{decision.reason}",
-                    tool=tool_name,
-                    payload={"arguments": arguments, "feedback": feedback},
-                )
             else:
                 budget.record_runtime_call()
-                response = await self._call_tool(session, trace, tool_name, arguments)
-                feedback = self._tool_feedback(response)
-                logger.info(
-                    "Tool {} returned status {}.",
-                    tool_name,
-                    feedback.get("status", "unknown"),
+                response = await self._call_tool(session, trace, tool_name, decision.arguments)
+                outcome = ToolOutcome.from_wire(
+                    info=response.info,
+                    observation=response.observation,
+                    terminal=response.task_result is not None,
                 )
+                logger.info("Tool {} returned status {}.", tool_name, outcome.status)
                 if response.task_result is not None:
                     return TaskResult.model_validate(response.task_result)
-                ledger.record(
-                    tool_name,
-                    arguments,
-                    feedback["result"],
-                    feedback,
-                    failed=response.info.get("error") is not None,
-                )
-                if open_items := ledger.summary():
-                    feedback = {**feedback, "still_open": open_items}
-                if not feedback.get("error"):
-                    fresh = flag_board.observe(feedback["result"])
-                    if fresh:
-                        trace.event(
-                            "flags",
-                            tool=tool_name,
-                            payload={"findings": [asdict(finding) for finding in fresh]},
-                        )
-                    if shown := flag_feedback(fresh):
-                        feedback = {**feedback, "flags": shown}
+                feedback = investigation.after_call(tool_name, decision.arguments, outcome).feedback
 
             messages.append(
                 {
@@ -335,80 +257,10 @@ class SimpleSGRAgent:
         Returns:
             Server tool-call response.
         """
-        trace.runtime_calls += 1
+        trace.count_runtime_call()
         started_at = time.perf_counter()
         response = await session.call_tool(tool_name, arguments)
-        trace.event(
-            "tool_call",
-            duration_ms=elapsed_ms(started_at),
-            tool=tool_name,
-            status=response.info.get("tool_status"),
-            reward=response.reward,
-            terminated=response.terminated,
-            truncated=response.truncated,
-            payload={"arguments": arguments, "response": response.model_dump(mode="json")},
+        trace.tool_call(
+            tool_name, arguments, response.model_dump(mode="json"), elapsed_ms(started_at)
         )
         return response
-
-    @staticmethod
-    def _trace_task_end(
-        trace: TaskTrace,
-        task_result: TaskResult,
-        error_message: str | None,
-    ) -> None:
-        """Write the closing summary line of a task trace.
-
-        Args:
-            trace: Task trace to finish.
-            task_result: Authoritative result returned by the runtime.
-            error_message: Agent failure that aborted the task, if any.
-        """
-        trace.event(
-            "task_end",
-            duration_ms=trace.wall_ms,
-            completion_reason=task_result.completion_reason,
-            total_reward=task_result.total_reward,
-            quality_score=task_result.quality_score,
-            efficiency_score=task_result.efficiency_score,
-            tool_calls=task_result.tool_calls,
-            steps_taken=task_result.steps_taken,
-            agent_steps=trace.step,
-            runtime_calls=trace.runtime_calls,
-            llm_calls=trace.llm_calls,
-            llm_tokens=trace.llm_tokens,
-            llm_ms=trace.llm_ms,
-            error=error_message,
-            payload={"task_result": task_result.model_dump(mode="json")},
-        )
-
-    @staticmethod
-    def _tool_feedback(response: ToolCallResult) -> dict[str, Any]:
-        """Reduce a remote tool response to the new evidence it carries.
-
-        The alert and the tool catalog repeat in every observation and are
-        already in the first message. The step reward is never shown: it
-        leaks the grader's ground truth.
-
-        Args:
-            response: Server tool-call response.
-
-        Returns:
-            Tool status, the complete tool result and the error, if any.
-        """
-        feedback = {
-            "status": response.info.get("tool_status", "unknown"),
-            "result": _decode_json(response.observation.get("last_tool_result")),
-        }
-        if response.info.get("error") is not None:
-            feedback["error"] = response.info["error"]
-        return feedback
-
-
-def _decode_json(value: Any) -> Any:
-    """Parse a JSON-encoded string so the LLM sees it without escaping."""
-    if not isinstance(value, str):
-        return value
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        return value

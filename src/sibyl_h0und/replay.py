@@ -15,19 +15,30 @@ results down by source, so a new source shows what it adds before it is merged.
 
 import argparse
 import json
+import os
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from sibyl_h0und.flags import HIGH, LEVEL_ORDER, LOW, MEDIUM, Finding, FlagBoard, rank_flags
-from sibyl_h0und.rules import DEFAULT_RULES
+from loguru import logger
 
-DEFAULT_ROOT = Path("~/.local/share/sibyl_h0und").expanduser()
+from sibyl_h0und.catalog import FINISH_TOOL
+from sibyl_h0und.flags import HIGH, LEVEL_ORDER, LOW, MEDIUM, Finding
+from sibyl_h0und.investigation import Investigation
+from sibyl_h0und.outcome import ToolOutcome
+from sibyl_h0und.trace import default_trace_dir
+from sibyl_h0und.trace import read_task as read_task_events
+
+# Where traces are read from, as the agent writes them: `$TRACE_DIR`, else the default.
+DEFAULT_TRACES = Path(os.environ.get("TRACE_DIR") or default_trace_dir()).expanduser()
+# The cache stays in the data root whatever `$TRACE_DIR` is; it records which traces built it.
+DEFAULT_ROOT = default_trace_dir().parent
 TRACE_GLOB = "*/*.trace.jsonl"
 # Bump the number when the cached fields change, so an old cache is ignored.
-CACHE_NAME = "tasks-v2.jsonl"
+CACHE_NAME = "tasks-v3.jsonl"
 # Quality below this marks a task as probably wrong. The runtime does not say
 # whether a verdict was right, so this is a heuristic to be tuned by the reader.
 DEFAULT_WRONG_BELOW = 0.2
@@ -48,54 +59,39 @@ def read_task(path: Path) -> Task:
         path: JSONL trace of one task.
 
     Returns:
-        Run and task ids, the submission and its verdict, quality and reward (`None`
-        when the task never ended) and the decoded result of every successful
-        runtime call, in order.
+        Run and task ids, the task observation, every runtime call with its
+        decoded outcome, the submission and its verdict, and quality and
+        reward (`None` when the task never ended).
     """
-    task: Task = {
-        "run_id": None,
-        "task_id": None,
-        "verdict": None,
-        "submission": None,
-        "quality": None,
-        "reward": None,
-        "results": [],
+    recorded = read_task_events(path)
+    submission = recorded.submission
+    return {
+        "run_id": recorded.run_id,
+        "task_id": recorded.task_id,
+        "observation": recorded.observation,
+        "calls": [
+            {"tool": call.tool, "arguments": call.arguments, **asdict(call.outcome)}
+            for call in recorded.calls
+        ],
+        "verdict": submission.get("verdict") if submission else None,
+        "submission": submission,
+        "quality": recorded.quality,
+        "reward": recorded.reward,
     }
-    with path.open(encoding="utf-8") as lines:
-        for line in lines:
-            if "tool_call" not in line and "task_end" not in line:
-                continue
-            event = json.loads(line)
-            task["run_id"], task["task_id"] = event.get("run_id"), event.get("task_id")
-            if event["kind"] == "task_end":
-                task["quality"] = event.get("quality_score")
-                task["reward"] = event.get("total_reward")
-            elif event["kind"] == "tool_call":
-                _read_call(event, task)
-    return task
 
 
-def _read_call(event: dict[str, Any], task: Task) -> None:
-    """Add one runtime call to the task, as a verdict or as a result."""
-    payload = event.get("payload", {})
-    if event.get("tool") == "finish_investigation":
-        arguments = payload.get("arguments", {})
-        submission = arguments.get("submission", arguments)
-        task["submission"] = submission
-        task["verdict"] = submission.get("verdict")
-        return
-    response = payload.get("response", {})
-    if response.get("info", {}).get("error") is not None:
-        return
-    raw = response.get("observation", {}).get("last_tool_result")
-    try:
-        task["results"].append(json.loads(raw) if isinstance(raw, str) else raw)
-    except json.JSONDecodeError:
-        task["results"].append(raw)
+def task_results(task: Task) -> Iterator[Any]:
+    """Yield the decoded result of every successful runtime call that is not the report."""
+    for call in task["calls"]:
+        if call["tool"] != FINISH_TOOL and call["error"] is None:
+            yield call["result"]
 
 
 def load_tasks(trace_dir: Path, cache_dir: Path, *, rebuild: bool = False) -> list[Task]:
     """Return every task, extracting from the traces only when the cache is stale.
+
+    The cache belongs to one trace directory and one set of trace files: it is
+    ignored when either differs from the one that built it.
 
     Args:
         trace_dir: Directory of run directories with task traces.
@@ -108,20 +104,27 @@ def load_tasks(trace_dir: Path, cache_dir: Path, *, rebuild: bool = False) -> li
     paths = sorted(trace_dir.glob(TRACE_GLOB))
     cache = cache_dir / CACHE_NAME
     newest = max((path.stat().st_mtime for path in paths), default=0.0)
+    source = {"trace_dir": str(trace_dir.resolve()), "files": len(paths)}
     if not rebuild and cache.exists() and cache.stat().st_mtime >= newest:
         with cache.open(encoding="utf-8") as lines:
-            return [json.loads(line) for line in lines]
+            if json.loads(next(lines, "{}")) == source:
+                return [json.loads(line) for line in lines]
     with ProcessPoolExecutor() as pool:
         tasks = [task for task in pool.map(read_task, paths, chunksize=4) if task["task_id"]]
     cache_dir.mkdir(parents=True, exist_ok=True)
     with cache.open("w", encoding="utf-8") as out:
+        out.write(json.dumps(source) + "\n")
         for task in tasks:
             out.write(json.dumps(task, ensure_ascii=False) + "\n")
     return tasks
 
 
 def replay(tasks: Iterable[Task]) -> tuple[Findings, Findings]:
-    """Run the default rules over every task, as the agent would have.
+    """Run each task's recorded outcomes through the agent's own handling.
+
+    Every recorded runtime answer goes through `Investigation.after_call`, so
+    the flags are what the model would have seen. A task whose trace has no
+    usable `task_start` cannot be rebuilt and has no findings.
 
     Args:
         tasks: Extracted tasks.
@@ -133,12 +136,23 @@ def replay(tasks: Iterable[Task]) -> tuple[Findings, Findings]:
     findings: Findings = {}
     shown: Findings = {}
     for task in tasks:
-        board = FlagBoard(DEFAULT_RULES)
         seen: list[Finding] = []
-        for result in task["results"]:
-            groups, _ = rank_flags(board.observe(result))
-            seen.extend(finding for group in groups for finding in group)
-        findings[task_key(task)] = list(board.findings.values())
+        investigation = None
+        try:
+            investigation = Investigation(task["observation"] or {})
+        except ValueError:
+            logger.warning("Skipping {}: its trace has no usable tool catalog.", task_key(task))
+        if investigation is not None:
+            for call in task["calls"]:
+                if call["terminal"]:
+                    continue
+                outcome = ToolOutcome(
+                    call["status"], call["result"], call["error"], call["terminal"]
+                )
+                seen.extend(
+                    investigation.after_call(call["tool"], call["arguments"], outcome).shown
+                )
+        findings[task_key(task)] = investigation.findings if investigation else []
         shown[task_key(task)] = seen
     return findings, shown
 
@@ -287,7 +301,7 @@ def task_rows(tasks: list[Task], findings: Findings, wrong_below: float) -> list
 def main(argv: list[str] | None = None) -> None:
     """Replay saved traces and print per-task and per-rule results."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--traces", type=Path, default=DEFAULT_ROOT / "traces")
+    parser.add_argument("--traces", type=Path, default=DEFAULT_TRACES)
     parser.add_argument("--cache", type=Path, default=DEFAULT_ROOT / "replay")
     parser.add_argument("--run", default="", help="Only runs whose id contains this text.")
     parser.add_argument("--rebuild", action="store_true", help="Re-extract the traces.")

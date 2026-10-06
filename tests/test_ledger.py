@@ -1,4 +1,5 @@
 from sibyl_h0und.ledger import GraphLedger
+from sibyl_h0und.outcome import ToolOutcome
 
 ALERT = {
     "alert": {
@@ -18,7 +19,7 @@ def fetched_ledger() -> GraphLedger:
     ledger = GraphLedger()
     ledger.observe_alert(ALERT)
     arguments = {"entity_id": "proc-1", "reasoning": "Inspect."}
-    ledger.record("get_entity", arguments, ENTITY, {"status": "ok", "result": ENTITY}, failed=False)
+    ledger.record("get_entity", arguments, ToolOutcome("ok", ENTITY, None))
     return ledger
 
 
@@ -42,9 +43,7 @@ def test_ids_from_relations_and_alert_are_known() -> None:
     ledger.record(
         "get_relation",
         {"relation_id": "rel-2", "reasoning": "x"},
-        relation,
-        {"status": "ok", "result": relation},
-        failed=False,
+        ToolOutcome("ok", relation, None),
     )
 
     assert ledger.unvisited_entities() == ["file-7"]
@@ -65,9 +64,7 @@ def test_failed_response_does_not_make_the_requested_id_known() -> None:
     ledger.record(
         "get_relation",
         {"relation_id": "rel-9", "reasoning": "x"},
-        error,
-        {"status": "error", "result": error},
-        failed=True,
+        ToolOutcome("error", error, error),
     )
 
     assert not ledger.is_known("rel-9")
@@ -83,7 +80,7 @@ def test_duplicate_call_is_served_from_the_cache() -> None:
     assert decision.feedback is not None
     assert decision.feedback["result"] == ENTITY
     search = {"query": "evil.exe", "reasoning": "Find it."}
-    ledger.record("search", search, [], {"status": "ok", "result": []}, failed=False)
+    ledger.record("search", search, ToolOutcome("ok", []))
     padded = {"query": " evil.exe ", "reasoning": "Find it again."}
     assert ledger.check("search", padded).reason == "cached"
 
@@ -126,9 +123,7 @@ def test_response_without_the_object_records_no_properties() -> None:
     ledger.record(
         "score_entity",
         {"entity_id": "proc-9-unseen", "reasoning": "x"},
-        other,
-        {"status": "ok", "result": other},
-        failed=False,
+        ToolOutcome("ok", other, None),
     )
 
     assert "proc-9-unseen" not in ledger.properties

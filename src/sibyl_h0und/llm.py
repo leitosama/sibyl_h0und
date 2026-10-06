@@ -167,9 +167,7 @@ class OpenAIStructuredStepClient:
             )
             raw_content = extract_raw_content(response)
             total_tokens = response_total_tokens(response)
-            trace.llm_calls += 1
-            trace.llm_tokens += total_tokens
-            trace.llm_ms += latency_ms
+            trace.count_llm_attempt(tokens=total_tokens, ms=latency_ms)
             trace.llm_call(
                 request_messages,
                 raw_content=raw_content,

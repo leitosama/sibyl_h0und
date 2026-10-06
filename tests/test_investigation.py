@@ -1,0 +1,138 @@
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from sibyl_h0und.catalog import FINISH_TOOL
+from sibyl_h0und.investigation import Investigation, LocalAnswer, Send
+from sibyl_h0und.outcome import ToolOutcome
+from sibyl_h0und.trace import TaskTrace
+
+CATALOG = [
+    {
+        "name": "get_entity",
+        "parameters": {
+            "type": "object",
+            "properties": {"entity_id": {"type": "string"}, "reasoning": {"type": "string"}},
+            "required": ["entity_id", "reasoning"],
+        },
+    },
+    {"name": FINISH_TOOL, "parameters": {"type": "object"}},
+]
+DROPPED_FILE = {
+    "id": "file-1",
+    "type": "windows_file",
+    "properties": {"path": "C:\\Windows\\System32\\run.ps1"},
+}
+
+
+REPORT = {
+    "verdict": "malicious",
+    "ir_artifacts": [{"entity_id": "file-1", "kind": "host_to_isolate"}],
+    "reasoning": "Script dropped into System32.",
+}
+
+
+def observation(specs: list[dict[str, Any]] = CATALOG) -> dict[str, Any]:
+    """Build a task observation whose alert names `file-1`."""
+    return {
+        "available_tools": json.dumps(specs),
+        "last_tool_result": '""',
+        "alert_text": json.dumps({"trigger_entities": [{"id": "file-1"}]}),
+    }
+
+
+def get_entity(entity_id: str = "file-1") -> dict[str, Any]:
+    """Arguments of a valid `get_entity` call."""
+    return {"entity_id": entity_id, "reasoning": "Inspect."}
+
+
+def test_tool_outside_the_catalog_is_answered_locally() -> None:
+    """A tool the task did not advertise never reaches the runtime."""
+    answer = Investigation(observation()).before_call("delete_everything", {})
+
+    assert isinstance(answer, LocalAnswer)
+    assert answer.feedback["status"] == "error"
+    assert "get_entity" in answer.feedback["message"]
+
+
+def test_only_the_report_is_allowed_when_finish_only() -> None:
+    """At the safety ceiling an advertised tool is still refused, and the report goes through."""
+    investigation = Investigation(observation())
+
+    refused = investigation.before_call("get_entity", get_entity(), finish_only=True)
+    allowed = investigation.before_call(FINISH_TOOL, {"submission": REPORT}, finish_only=True)
+
+    assert isinstance(refused, LocalAnswer)
+    assert FINISH_TOOL in refused.feedback["message"]
+    assert allowed == Send({"submission": REPORT})
+
+
+def test_a_catalog_without_the_report_tool_is_refused() -> None:
+    """A task that cannot be finished is not started."""
+    with pytest.raises(ValueError, match=FINISH_TOOL):
+        Investigation(observation(CATALOG[:1]))
+
+
+def test_invalid_arguments_and_invented_ids_are_answered_locally() -> None:
+    """Both cost no runtime call, and the model is told what is wrong."""
+    investigation = Investigation(observation())
+
+    invalid = investigation.before_call("get_entity", {"reasoning": "No id."})
+    invented = investigation.before_call("get_entity", get_entity("file-404"))
+
+    assert isinstance(invalid, LocalAnswer)
+    assert "Not sent to the runtime" in invalid.feedback["message"]
+    assert isinstance(invented, LocalAnswer)
+    assert "file-404" in invented.feedback["message"]
+
+
+def test_evidence_comes_with_flags_and_open_ids_and_a_repeat_gets_only_the_evidence() -> None:
+    """Flags and still_open are delivered once; the cached reply repeats the evidence."""
+    investigation = Investigation(observation())
+    sent = investigation.before_call("get_entity", get_entity())
+    assert isinstance(sent, Send)
+
+    reply = investigation.after_call("get_entity", sent.arguments, ToolOutcome("ok", DROPPED_FILE))
+    repeat = investigation.before_call("get_entity", get_entity())
+
+    assert reply.feedback["result"] == DROPPED_FILE
+    assert reply.feedback["flags"]
+    assert [finding.node_id for finding in reply.shown] == ["file-1"]
+    assert isinstance(repeat, LocalAnswer)
+    assert repeat.feedback["result"] == DROPPED_FILE
+    assert "flags" not in repeat.feedback
+    assert "still_open" not in repeat.feedback
+    assert "note" in repeat.feedback
+
+
+def test_a_runtime_error_is_not_judged_and_teaches_nothing() -> None:
+    """An error response carries no flags, even if it echoes a node."""
+    investigation = Investigation(observation())
+
+    reply = investigation.after_call(
+        "get_entity", get_entity("file-9"), ToolOutcome("error", DROPPED_FILE, "boom")
+    )
+
+    assert reply.feedback["error"] == "boom"
+    assert "flags" not in reply.feedback
+    assert reply.shown == ()
+    assert investigation.findings == []
+    assert isinstance(investigation.before_call("get_entity", get_entity("file-9")), LocalAnswer)
+
+
+def test_local_decisions_are_traced(tmp_path: Path) -> None:
+    """Rejections and cache hits leave the events the trace format promises."""
+    path = tmp_path / "t.trace.jsonl"
+    investigation = Investigation(observation(), TaskTrace(path, task_id="t"))
+    investigation.before_call("delete_everything", {})
+    investigation.before_call("get_entity", {"reasoning": "No id."})
+    sent = investigation.before_call("get_entity", get_entity())
+    assert isinstance(sent, Send)
+    investigation.after_call("get_entity", sent.arguments, ToolOutcome("ok", DROPPED_FILE))
+    investigation.before_call("get_entity", get_entity())
+
+    kinds = [json.loads(line)["kind"] for line in path.read_text().splitlines()]
+
+    assert kinds == ["tool_rejected", "tool_invalid", "flags", "tool_cached"]
