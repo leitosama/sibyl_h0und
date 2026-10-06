@@ -14,10 +14,14 @@ A query is one string. It is matched the same way whatever it is:
 - a file name or path finds entries by normalized program name, and a name
   with a version or `.exe` is reduced the same way the packs were built;
 - a domain finds the RMM tool of that domain or of a parent domain;
+- a driver file name (`RTCore64.sys`) or a SHA-256 finds the LOLDrivers entries, and a DLL
+  name finds the HijackLibs entries with the locations of the legitimate copy;
 - a Unix program name or path finds the GTFOBins and GTFOArgs entries (`curl`,
   `/usr/bin/find`);
 - an absolute Windows path or a file extension finds the rows of the Nextron
   antivirus cheat sheet;
+- a registry key path (`HKLM\\...`, `HKCU\\...`) finds the autostart locations of
+  ForensicArtifacts that are the key or one of its parents;
 - any words find the techniques, software and WTFBins entries that share them.
 """
 
@@ -29,7 +33,14 @@ from typing import Any
 
 from sibyl_h0und.knowledge import load_pack
 from sibyl_h0und.nextron import extension_row, location_row, user_row
-from sibyl_h0und.normalize import attack_id, domain, program_name, unix_program
+from sibyl_h0und.normalize import (
+    attack_id,
+    domain,
+    file_key,
+    program_name,
+    registry_path,
+    unix_program,
+)
 
 KNOWLEDGE_TOOL = "lookup_knowledge"
 KNOWLEDGE_TOOL_SPEC: dict[str, Any] = {
@@ -38,9 +49,12 @@ KNOWLEDGE_TOOL_SPEC: dict[str, Any] = {
         "Look up a term in local security knowledge, with no cost to the investigation: "
         "MITRE ATT&CK techniques and software, LOLBAS and GTFOBins (abusable Windows and Unix "
         "binaries), GTFOArgs (abusable Unix arguments), LOLRMM remote management tools, "
-        "WTFBins benign programs that look suspicious, and the Nextron antivirus cheat sheet. "
-        "The query is an ATT&CK id (T1036.003, S0195), a file name or path, a domain, or words "
-        "describing behavior. Entries are returned as the sources state them, with no verdict."
+        "WTFBins benign programs that look suspicious, ForensicArtifacts Windows autostart "
+        "registry locations, LOLDrivers abusable drivers, HijackLibs DLL hijacking "
+        "opportunities, and the Nextron antivirus cheat sheet. "
+        "The query is an ATT&CK id (T1036.003, S0195), a file name or path, a SHA-256, "
+        "a registry key path, a domain, or words describing behavior. Entries are returned as "
+        "the sources state them, with no verdict."
     ),
     "parameters": {
         "type": "object",
@@ -127,6 +141,9 @@ class Vocabulary:
         self._wtfbins = load_pack("wtfbins")
         self._gtfobins = load_pack("gtfobins")
         self._gtfoargs = load_pack("gtfoargs")
+        self._autostart = load_pack("forensicartifacts_autostart")
+        self._loldrivers = load_pack("loldrivers")
+        self._hijacklibs = load_pack("hijacklibs")
         self._wtfbin_by_id = {doc["id"]: doc for doc in self._wtfbins.documents}
         self._gtfobins_notes = {doc["id"]: doc for doc in self._gtfobins.documents}
         self._users_of: dict[str, list[str]] = defaultdict(list)
@@ -161,7 +178,11 @@ class Vocabulary:
         matches: list[dict[str, Any]] = []
         if text:
             matches += self._by_id(text)
-            matches += self._by_program(text)
+            if registry_path(text):
+                matches += self._by_registry(text)
+            else:
+                matches += self._by_program(text)
+                matches += self._by_driver(text)
             matches += self._by_domain(text)
             matches += self._by_cheat_sheet(text)
             if self._is_description(text) or (not matches and _PLAIN_WORD.match(text)):
@@ -169,8 +190,8 @@ class Vocabulary:
         answer: dict[str, Any] = {"query": text, "matches": matches}
         if not matches:
             answer["note"] = (
-                "No entry in ATT&CK, LOLBAS, GTFOBins, GTFOArgs, LOLRMM, WTFBins or the Nextron "
-                "cheat sheet. "
+                "No entry in ATT&CK, LOLBAS, GTFOBins, GTFOArgs, LOLRMM, WTFBins, "
+                "ForensicArtifacts, LOLDrivers, HijackLibs or the Nextron cheat sheet. "
                 "That says nothing about whether the term is benign or hostile."
             )
         return answer
@@ -248,7 +269,28 @@ class Vocabulary:
             found.append({"source": "lolrmm", "kind": "rmm_executable", "name": name, **entry})
         for doc in self._wtfbins.entries.get(name, ()):
             found.append({"source": "wtfbins", "kind": "benign_but_suspicious", **doc})
+        if (entries := self._hijacklibs.entries.get(name)) is not None:
+            found.append(
+                {"source": "hijacklibs", "kind": "dll_hijack", "name": name, "entries": entries}
+            )
         return found
+
+    def _by_driver(self, text: str) -> list[dict[str, Any]]:
+        """Find the LOLDrivers entries for a driver file name or a SHA-256."""
+        if (file_name := _file_name(text)) is None:
+            return []
+        if (indexes := self._loldrivers.lookup(file_name)) is None:
+            return []
+        digest = file_key(file_name)
+        return [
+            {
+                "source": "loldrivers",
+                "kind": "driver",
+                "matched_on": "sha256" if digest and len(digest) == 64 else "name",
+                "queried": digest,
+                "drivers": [self._loldrivers.documents[index] for index in indexes],
+            }
+        ]
 
     def _unix(self, text: str) -> list[dict[str, Any]]:
         """Find the GTFOBins and GTFOArgs entries of a Unix program name."""
@@ -283,6 +325,37 @@ class Vocabulary:
             )
         return found
 
+    def _by_registry(self, text: str) -> list[dict[str, Any]]:
+        """Find the autostart locations for a registry key: the key itself and its parents.
+
+        An artifact that names one value of a key applies to that key only; one that
+        names the key as a whole also applies to the keys below it. `relation` says
+        which of the two the answer is.
+        """
+        path = registry_path(text)
+        parts = (path or "").split("\\")
+        found = []
+        for end in range(len(parts), 0, -1):
+            key = "\\".join(parts[:end])
+            exact = end == len(parts)
+            entries = [
+                entry
+                for entry in self._autostart.entries.get(key, ())
+                if exact or "value" not in entry
+            ]
+            if entries:
+                found.append(
+                    {
+                        "source": "forensicartifacts",
+                        "kind": "autostart_location",
+                        "key": key,
+                        "relation": "same_key" if exact else "key_is_below",
+                        "queried": text,
+                        "artifacts": entries,
+                    }
+                )
+        return found
+
     def _by_domain(self, text: str) -> list[dict[str, Any]]:
         """Find the RMM tool of a domain or of one of its parent domains."""
         if (host := domain(text)) is None:
@@ -314,7 +387,9 @@ class Vocabulary:
     @staticmethod
     def _is_description(text: str) -> bool:
         """Tell whether a query is words, not an id, a path, a SID, a domain or a file name."""
-        structured = attack_id(text) or _ABSOLUTE_PATH.match(text) or _SID.match(text)
+        structured = (
+            attack_id(text) or _ABSOLUTE_PATH.match(text) or _SID.match(text) or registry_path(text)
+        )
         return not structured and " " in text.strip()
 
     def _by_words(self, text: str, already: list[dict[str, Any]]) -> list[dict[str, Any]]:

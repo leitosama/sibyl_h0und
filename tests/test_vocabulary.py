@@ -2,6 +2,7 @@ from typing import Any
 
 import pytest
 
+from sibyl_h0und.knowledge import load_pack
 from sibyl_h0und.nextron import extension_row, location_row, user_row
 from sibyl_h0und.vocabulary import shared
 
@@ -134,3 +135,79 @@ def test_cheat_sheet_rates_a_windows_directory_as_the_sheet_does_for_a_flagged_f
     assert extension_row("notes.txt")["rating"] == "highly relevant"
     assert extension_row("tool.exe") is None
     assert user_row("S-1-5-21-1-2-3-1001")["account"] == "standard user"
+
+
+@pytest.mark.parametrize(
+    ("query", "artifact"),
+    [
+        ("HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\GoogleUpdate", "WindowsRunKeys"),
+        (
+            "HKEY_USERS\\S-1-5-21-1-2-3-1001\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            "WindowsRunKeys",
+        ),
+        ("HKLM\\System\\ControlSet001\\Services\\PSEXESVC", "WindowsServices"),
+        ("HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", "WindowsRunKeys"),
+    ],
+)
+def test_a_registry_path_finds_the_autostart_location_that_holds_it(
+    query: str, artifact: str
+) -> None:
+    """The match is on the key or a parent, whatever the hive spelling or value name."""
+    (match, *_) = shared().lookup(query)["matches"]
+
+    assert (match["source"], match["kind"]) == ("forensicartifacts", "autostart_location")
+    assert [item["artifact"] for item in match["artifacts"]] == [artifact]
+
+
+def test_a_key_with_no_autostart_entry_gets_no_answer_and_no_verdict() -> None:
+    """Application settings are not in the source, and the answer says nothing about safety."""
+    answer = shared().lookup("HKLM\\Software\\Vendor\\App\\Settings")
+
+    assert answer["matches"] == []
+    assert "nothing about whether" in answer["note"]
+
+
+def test_a_driver_is_found_by_file_name_under_any_path_and_by_sha256() -> None:
+    by_name = shared().lookup("C:\\Windows\\Temp\\RTCore64.SYS")
+    (loldrivers,) = [m for m in by_name["matches"] if m["source"] == "loldrivers"]
+    digest = next(key for key in load_pack("loldrivers").entries if len(key) == 64)
+    (by_hash,) = [
+        m for m in shared().lookup(digest.upper())["matches"] if m["source"] == "loldrivers"
+    ]
+
+    assert loldrivers["matched_on"] == "name"
+    assert all({"id", "category", "url"} <= set(driver) for driver in loldrivers["drivers"])
+    assert by_hash["matched_on"] == "sha256"
+
+
+def test_a_dll_name_brings_where_its_legitimate_copy_lives() -> None:
+    """The model compares the path it saw with the locations the source states."""
+    (match,) = [
+        m
+        for m in shared().lookup("C:\\Users\\Public\\Version.dll")["matches"]
+        if m["source"] == "hijacklibs"
+    ]
+
+    assert match["name"] == "version.dll"
+    assert "%SYSTEM32%" in match["entries"][0]["expected_locations"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["C:\\AzAgent\\_work\\1\\s\\bin\\app.dll", "C:\\ProgramData\\x\\helper.sys", "hidusb.sys"],
+)
+def test_benign_drops_get_no_driver_or_dll_entry(query: str) -> None:
+    assert not sources(shared().lookup(query)) & {"loldrivers", "hijacklibs"}
+
+
+def test_an_artifact_that_names_one_value_does_not_cover_the_keys_below_its_key() -> None:
+    """`Control` is listed for one value only; a key below it gets no entry from it."""
+    below = shared().lookup("HKLM\\System\\CurrentControlSet\\Control\\Terminal Server")
+    exact = shared().lookup("HKLM\\System\\CurrentControlSet\\Control")
+
+    assert below["matches"] == []
+    assert [m["relation"] for m in exact["matches"]] == ["same_key"]
+    assert (
+        shared().lookup("HKLM\\System\\CurrentControlSet\\Services\\x")["matches"][0]["relation"]
+        == "key_is_below"
+    )

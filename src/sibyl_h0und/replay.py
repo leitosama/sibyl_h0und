@@ -15,6 +15,7 @@ only in a `practice` run (ADR 0017).
 import argparse
 import json
 import os
+import re
 from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor
@@ -40,7 +41,18 @@ DEFAULT_WRONG_BELOW = 0.2
 
 Task = dict[str, Any]
 # Node properties whose value is a term worth asking the vocabulary about.
-TERM_PROPERTIES = ("image_path", "original_filename", "parent_image", "fqdn")
+TERM_PROPERTIES = (
+    "image_path",
+    "original_filename",
+    "parent_image",
+    "fqdn",
+    "sha256",
+)
+# Service properties that hold a command line; its program is the term.
+COMMAND_PROPERTIES = ("binary_path", "service_dll")
+_PROGRAM = re.compile(r'^"?(.+?\.(?:exe|sys|dll))', re.IGNORECASE)
+# Node types whose `path` is worth asking about: a registry key, a file.
+PATH_TYPES = ("registry_key", "windows_file")
 
 
 def task_key(task: Task) -> str:
@@ -133,9 +145,14 @@ def terms(task: Task) -> set[str]:
     for result in task_results(task):
         for node in nodes(result):
             properties = node.get("properties")
-            for name in TERM_PROPERTIES if isinstance(properties, dict) else ():
+            names = (*TERM_PROPERTIES, *(("path",) if node["type"] in PATH_TYPES else ()))
+            for name in names if isinstance(properties, dict) else ():
                 if isinstance(value := properties.get(name), str) and value:
                     found.add(value)
+            for name in COMMAND_PROPERTIES if isinstance(properties, dict) else ():
+                value = properties.get(name)
+                if isinstance(value, str) and (program := _PROGRAM.match(value.strip())):
+                    found.add(program.group(1))
     return found
 
 
