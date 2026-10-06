@@ -13,6 +13,7 @@ from bluesec1_client import (
 )
 from sibyl_h0und.agent import SimpleSGRAgent
 from sibyl_h0und.models import NextStep
+from sibyl_h0und.replay import load_tasks, replay
 from sibyl_h0und.trace import TaskTrace
 
 # A catalog entry with a marker that shows where the catalog reaches the LLM.
@@ -383,3 +384,20 @@ def test_agent_reserves_the_last_runtime_call_for_the_report(tmp_path: Path) -> 
     (run_dir,) = tmp_path.iterdir()
     kinds = [event["kind"] for event in read_events(run_dir / "001_task-1.trace.jsonl")]
     assert kinds.count("finish_only") == 1
+
+
+def test_a_trace_the_agent_wrote_replays_to_what_the_model_saw(tmp_path: Path) -> None:
+    """The trace the agent writes is the one replay reads, and both judge it alike."""
+    llm = FakeStepClient([get_entity_step("entity-1"), investigation_steps()[1]])
+    agent = SimpleSGRAgent(llm, trace_dir=tmp_path / "traces")
+    asyncio.run(agent.run(cast(RemoteBenchmarkClient, FakeClient(DroppedFileSession()))))
+
+    (task,) = load_tasks(tmp_path / "traces", tmp_path / "cache")
+    findings, shown = replay([task])
+
+    assert [call["tool"] for call in task["calls"]] == ["get_entity", "finish_investigation"]
+    assert task["calls"][0]["result"]["id"] == "entity-1"
+    assert task["verdict"] == "malicious"
+    seen = json.loads(llm.requests[1][-1]["content"])["flags"]
+    assert [finding.node_id for finding in shown["run-1:task-1"]] == [line["id"] for line in seen]
+    assert {finding.node_id for finding in findings["run-1:task-1"]} == {"entity-1"}

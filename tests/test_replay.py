@@ -12,6 +12,7 @@ from sibyl_h0und.replay import (
     source_changes,
     source_table,
 )
+from sibyl_h0und.trace import TaskTrace, task_trace_path
 
 SHELL_PROCESS = {
     "id": "proc-1",
@@ -23,32 +24,24 @@ SHELL_PROCESS = {
 }
 
 
-def write_trace(root: Path, run: str, verdict: str, quality: float, result: dict[str, Any]) -> None:
-    """Write the trace of one task `t1`: a graph read and a verdict."""
-    events = [
-        {
-            "run_id": run,
-            "task_id": "t1",
-            "kind": "tool_call",
-            "tool": "get_entity",
-            "payload": {
-                "arguments": {},
-                "response": {"observation": {"last_tool_result": json.dumps(result)}, "info": {}},
-            },
-        },
-        {
-            "run_id": run,
-            "task_id": "t1",
-            "kind": "tool_call",
-            "tool": "finish_investigation",
-            "payload": {"arguments": {"submission": {"verdict": verdict}}, "response": {}},
-        },
-        {"run_id": run, "task_id": "t1", "kind": "task_end", "quality_score": quality},
+CATALOG = json.dumps(
+    [
+        {"name": "get_entity", "parameters": {"type": "object"}},
+        {"name": "finish_investigation", "parameters": {"type": "object"}},
     ]
-    run_dir = root / run
-    run_dir.mkdir(parents=True)
-    lines = (json.dumps(event) for event in events)
-    (run_dir / "001_t1.trace.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+)
+
+
+def write_trace(root: Path, run: str, verdict: str, quality: float, result: dict[str, Any]) -> None:
+    """Write the trace of one task `t1`, with the writer the agent uses: a read and a verdict."""
+    trace = TaskTrace(task_trace_path(root / run, 1, "t1"), run_id=run, task_id="t1")
+    observation = {"available_tools": CATALOG, "alert_text": "Alert."}
+    trace.task_start({}, {"observation": observation}, {})
+    read = {"observation": {"last_tool_result": json.dumps(result)}, "info": {}}
+    trace.tool_call("get_entity", {"entity_id": "x"}, read, 1)
+    report = {"task_result": {"completion_reason": "terminated"}, "info": {}, "observation": {}}
+    trace.tool_call("finish_investigation", {"submission": {"verdict": verdict}}, report, 1)
+    trace.task_end({"completion_reason": "terminated", "quality_score": quality}, None)
 
 
 def test_replay_separates_runs_that_repeat_a_task_id(tmp_path: Path) -> None:
@@ -108,3 +101,13 @@ def test_new_source_shows_up_per_source_in_tables_and_compare(tmp_path: Path) ->
     counts = source_changes(changes, {**old["sources"], **current["sources"]})
 
     assert counts["lolbas"] == {"gained": 2, "lost": 0}
+
+
+def test_cache_of_another_trace_directory_is_not_reused(tmp_path: Path) -> None:
+    """A different or empty trace directory must not answer with the old tasks."""
+    write_trace(tmp_path / "traces", "run-a", "benign", 0.0, SHELL_PROCESS)
+    assert len(load_tasks(tmp_path / "traces", tmp_path / "cache")) == 1
+
+    (tmp_path / "empty").mkdir()
+
+    assert load_tasks(tmp_path / "empty", tmp_path / "cache") == []

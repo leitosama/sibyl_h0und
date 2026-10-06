@@ -18,11 +18,13 @@ from typing import Any
 from sibyl_h0und.nextron import form_rating, location_rating, user_rating
 from sibyl_h0und.replay import (
     DEFAULT_ROOT,
+    DEFAULT_TRACES,
     DEFAULT_WRONG_BELOW,
     Task,
     is_wrong,
     load_tasks,
     task_key,
+    task_results,
 )
 
 HIGH_SCORE = 3
@@ -54,7 +56,7 @@ def index_task(task: Task) -> tuple[dict[str, Node], dict[str, Node]]:
             for child in node:
                 walk(child)
 
-    for result in task["results"]:
+    for result in task_results(task):
         walk(result)
     return entities, relations
 
@@ -104,7 +106,7 @@ def main() -> None:
 
     # (verdict, wrong) -> cited, rated, high objects and tasks with a high object.
     totals: dict[tuple[str, bool], Counter[str]] = {}
-    for task in load_tasks(DEFAULT_ROOT / "traces", DEFAULT_ROOT / "replay"):
+    for task in load_tasks(DEFAULT_TRACES, DEFAULT_ROOT / "replay"):
         wrong = is_wrong(task, args.wrong_below)
         if wrong is None or task["submission"] is None:
             continue

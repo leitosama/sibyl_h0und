@@ -4,17 +4,26 @@ One directory per run holds one `<seq>_<task_id>.trace.jsonl` file per task.
 Every line is one event with flat top-level fields for viewers and SQL, and
 raw request/response data under `payload`. Tracing never breaks a run: a
 failed write is logged and skipped.
+
+This module owns the event format. `TaskTrace` writes each event kind through
+a typed method, and `read_task` reads the same kinds back, so the agent, the
+LLM client and replay never touch the raw shape. Old traces must stay
+readable (ADR 0008): add fields, do not rename them.
 """
 
 import json
 import os
 import re
 import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
+
+from sibyl_h0und.catalog import FINISH_TOOL
+from sibyl_h0und.outcome import ToolOutcome
 
 
 def default_trace_dir() -> Path:
@@ -100,6 +109,90 @@ class TaskTrace:
         except OSError as error:
             logger.warning("Skipping trace event {} in {}: {}", kind, self.path, error)
 
+    def next_step(self) -> int:
+        """Start the next agent turn and return its number."""
+        self.step += 1
+        return self.step
+
+    def count_runtime_call(self) -> None:
+        """Count a call sent to the runtime, before it can fail."""
+        self.runtime_calls += 1
+
+    def count_llm_attempt(self, *, tokens: int, ms: int) -> None:
+        """Count one LLM request attempt with its token usage and latency."""
+        self.llm_calls += 1
+        self.llm_tokens += tokens
+        self.llm_ms += ms
+
+    def task_start(
+        self, run: dict[str, Any], task: dict[str, Any], step_format: dict[str, Any]
+    ) -> None:
+        """Write the opening event: run settings, the task and the step schema."""
+        self.event("task_start", payload={"run": run, "task": task, "step_format": step_format})
+
+    def finish_only(self, reason: str | None, runtime_calls: int) -> None:
+        """Write that only `finish_investigation` may be called from now on."""
+        self.event("finish_only", payload={"reason": reason, "runtime_calls": runtime_calls})
+
+    def step_chosen(self, tool: str, step: dict[str, Any]) -> None:
+        """Write the model's decoded step."""
+        self.event("step", tool=tool, payload={"step": step})
+
+    def local_answer(
+        self, kind: str, tool: str, arguments: dict[str, Any], feedback: dict[str, Any] | None
+    ) -> None:
+        """Write a call answered without the runtime.
+
+        Args:
+            kind: `tool_rejected`, `tool_invalid` or `tool_cached`.
+            tool: Tool the model asked for.
+            arguments: Arguments of the call.
+            feedback: Answer shown to the model, if it is worth keeping.
+        """
+        payload: dict[str, Any] = {"arguments": arguments}
+        if feedback is not None:
+            payload["feedback"] = feedback
+        self.event(kind, tool=tool, payload=payload)
+
+    def tool_call(
+        self, tool: str, arguments: dict[str, Any], response: dict[str, Any], duration_ms: int
+    ) -> None:
+        """Write one runtime call with the full decoded `ToolCallResult` response."""
+        self.event(
+            "tool_call",
+            duration_ms=duration_ms,
+            tool=tool,
+            status=response.get("info", {}).get("tool_status"),
+            reward=response.get("reward"),
+            terminated=response.get("terminated"),
+            truncated=response.get("truncated"),
+            payload={"arguments": arguments, "response": response},
+        )
+
+    def flags(self, tool: str, findings: list[dict[str, Any]]) -> None:
+        """Write the findings a tool result produced."""
+        self.event("flags", tool=tool, payload={"findings": findings})
+
+    def task_end(self, task_result: dict[str, Any], error: str | None) -> None:
+        """Write the closing summary line with the authoritative result and counters."""
+        self.event(
+            "task_end",
+            duration_ms=self.wall_ms,
+            completion_reason=task_result.get("completion_reason"),
+            total_reward=task_result.get("total_reward"),
+            quality_score=task_result.get("quality_score"),
+            efficiency_score=task_result.get("efficiency_score"),
+            tool_calls=task_result.get("tool_calls"),
+            steps_taken=task_result.get("steps_taken"),
+            agent_steps=self.step,
+            runtime_calls=self.runtime_calls,
+            llm_calls=self.llm_calls,
+            llm_tokens=self.llm_tokens,
+            llm_ms=self.llm_ms,
+            error=error,
+            payload={"task_result": task_result},
+        )
+
     def llm_call(self, messages: list[dict[str, Any]], *, raw_content: str, **fields: Any) -> None:
         """Append an `llm_call` event that stores only the request's new messages.
 
@@ -145,3 +238,83 @@ def llm_requests(events: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
         current = current[: payload.get("prefix", 0)] + payload["messages"]
         requests.append(current)
     return requests
+
+
+@dataclass(frozen=True)
+class RecordedCall:
+    """One runtime call read back from a trace."""
+
+    tool: str
+    arguments: dict[str, Any]
+    outcome: ToolOutcome
+
+
+@dataclass
+class RecordedTask:
+    """What a trace says about one task.
+
+    Attributes:
+        run_id: Runtime run id; practice runs repeat task ids across runs.
+        task_id: Runtime task id.
+        observation: The task's observation as the agent received it, or `None`
+            when the trace has no `task_start`.
+        calls: Runtime calls in order.
+        quality: Final quality score, `None` when the task never ended.
+        reward: Final total reward, `None` when the task never ended.
+    """
+
+    run_id: str | None = None
+    task_id: str | None = None
+    observation: dict[str, Any] | None = None
+    calls: list[RecordedCall] = field(default_factory=list)
+    quality: float | None = None
+    reward: float | None = None
+
+    @property
+    def submission(self) -> dict[str, Any] | None:
+        """Arguments of the last `finish_investigation` call, without its wrapper."""
+        for call in reversed(self.calls):
+            if call.tool == FINISH_TOOL:
+                return call.arguments.get("submission", call.arguments)
+        return None
+
+
+def read_task(path: Path) -> RecordedTask:
+    """Read the events a replay needs from one task trace.
+
+    Args:
+        path: JSONL trace of one task.
+
+    Returns:
+        Identifiers, the task observation, every runtime call decoded as the
+        agent decodes a live response, and the final scores.
+    """
+    task = RecordedTask()
+    with path.open(encoding="utf-8") as lines:
+        for line in lines:
+            if not any(
+                f'"kind": "{kind}"' in line for kind in ("task_start", "tool_call", "task_end")
+            ):
+                continue
+            event = json.loads(line)
+            kind = event.get("kind")
+            if kind not in {"task_start", "tool_call", "task_end"}:
+                continue
+            task.run_id, task.task_id = event.get("run_id"), event.get("task_id")
+            payload = event.get("payload") or {}
+            if kind == "task_start":
+                task.observation = (payload.get("task") or {}).get("observation")
+            elif kind == "task_end":
+                task.quality = event.get("quality_score")
+                task.reward = event.get("total_reward")
+            else:
+                response = payload.get("response") or {}
+                outcome = ToolOutcome.from_wire(
+                    info=response.get("info") or {},
+                    observation=response.get("observation") or {},
+                    terminal=response.get("task_result") is not None,
+                )
+                task.calls.append(
+                    RecordedCall(event.get("tool", ""), payload.get("arguments") or {}, outcome)
+                )
+    return task

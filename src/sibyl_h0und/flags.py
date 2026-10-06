@@ -392,7 +392,11 @@ def flag_feedback(findings: Iterable[Finding], limit: int = FLAG_LIMIT) -> list[
     rules spoke, the reason names each rule. A final line counts the flagged
     nodes that did not fit the limit.
     """
-    shown, omitted = rank_flags(findings, limit)
+    return flag_lines(*rank_flags(findings, limit))
+
+
+def flag_lines(shown: list[list[Finding]], omitted: int) -> list[dict[str, Any]]:
+    """Format the result of `rank_flags` as the lines the model sees."""
     lines = []
     for group in shown:
         top = max(group, key=lambda item: LEVEL_ORDER[item.level])

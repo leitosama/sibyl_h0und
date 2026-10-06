@@ -34,6 +34,8 @@ src/sibyl_h0und/
   cli.py                       точка входа h0und: настройки, run, печать итогов
   settings.py                  настройки из окружения / .env
   agent.py                     SimpleSGRAgent: цикл «одно действие за ход», SYSTEM_PROMPT
+  investigation.py             Investigation: before_call / after_call одной задачи (ADR 0016)
+  outcome.py                   ToolOutcome: ответ runtime, разобранный один раз
   llm.py                       клиент OpenAI-совместимого API со structured output
   catalog.py                   ToolCatalog: каталог задачи и строгая схема шага из него
   budget.py                    CallBudget: страховочный лимит вызовов runtime, режим «только отчёт»
@@ -46,16 +48,16 @@ src/sibyl_h0und/
   lolbas.py                    правило по пакету LOLBAS
   normalize.py                 общая нормализация: имя программы, командная строка, путь, домен
   knowledge/                   пакеты знаний: JSON-снимки внешних источников и NOTICE
-  trace.py                     JSONL-трейсы run'ов и задач вне репозитория
+  trace.py                     JSONL-трейсы вне репозитория: запись и чтение событий
   replay.py                    офлайн-проигрывание трейсов через флаги
 tests/                         тесты без сети
 ```
 
 Цикл агента: на каждом шаге модель возвращает `NextStep` (состояние, план,
 один вызов инструмента) по строгой JSON-схеме, которую `ToolCatalog` строит
-из `available_tools` задачи. Агент проверяет вызов по
-каталогу задачи и в GraphLedger, отправляет в runtime только то, что нельзя
-ответить локально, и добавляет в историю `last_tool_result` вместе с
+из `available_tools` задачи. `Investigation.before_call` проверяет вызов по каталогу задачи и в
+GraphLedger, в runtime уходит только то, что нельзя ответить локально, а
+`after_call` собирает ответ для модели: `last_tool_result` вместе с
 `still_open` и `flags`. Задача заканчивается, когда `finish_investigation`
 возвращает `task_result`.
 

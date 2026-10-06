@@ -10,6 +10,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from sibyl_h0und.outcome import ToolOutcome
+
 # Keys whose string value names an entity or a relation.
 ENTITY_ID_KEYS = frozenset({"entity_id", "source_id", "target_id"})
 RELATION_ID_KEYS = frozenset({"relation_id"})
@@ -97,28 +99,22 @@ class GraphLedger:
             )
         return LedgerDecision()
 
-    def record(
-        self,
-        tool_name: str,
-        arguments: dict[str, Any],
-        result: Any,
-        feedback: dict[str, Any],
-        *,
-        failed: bool,
-    ) -> None:
-        """Learn from one runtime response and cache it.
+    def record(self, tool_name: str, arguments: dict[str, Any], outcome: ToolOutcome) -> None:
+        """Learn from one runtime response and cache its evidence.
+
+        A failed response may echo the requested id, so it never makes an id
+        known. A cache hit returns the evidence only: flags and open relations
+        were delivered once with the first answer.
 
         Args:
             tool_name: Called tool name.
             arguments: Arguments sent to the runtime.
-            result: Decoded `last_tool_result`.
-            feedback: Feedback shown to the model for this call.
-            failed: Whether the runtime reported an error. A failed response
-                may echo the requested id, so it never makes an id known.
+            outcome: The runtime's answer.
         """
-        self.cache[self._cache_key(tool_name, arguments)] = feedback
-        if failed:
+        self.cache[self._cache_key(tool_name, arguments)] = outcome.evidence()
+        if outcome.failed:
             return
+        result = outcome.result
         entity_id = arguments.get("entity_id")
         relation_id = arguments.get("relation_id")
         if isinstance(entity_id, str):
