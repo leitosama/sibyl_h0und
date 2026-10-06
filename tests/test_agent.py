@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -11,10 +12,12 @@ from bluesec1_client import (
     TaskResult,
     ToolCallResult,
 )
-from sibyl_h0und.agent import SimpleSGRAgent
-from sibyl_h0und.models import NextStep
+from sibyl_h0und.agent import SYSTEM_PROMPT, SimpleSGRAgent
+from sibyl_h0und.catalog import FINISH_TOOL
+from sibyl_h0und.models import PRACTICE_ARGUMENT_MODELS, NextStep
 from sibyl_h0und.replay import load_tasks
 from sibyl_h0und.trace import TaskTrace
+from sibyl_h0und.vocabulary import KNOWLEDGE_TOOL
 
 # A catalog entry with a marker that shows where the catalog reaches the LLM.
 TOOL_CATALOG = json.dumps(
@@ -167,7 +170,6 @@ def make_step(tool: str, **arguments: Any) -> NextStep:
         {
             "current_state": "Reading the graph.",
             "plan_remaining_steps_brief": [f"Call {tool}."],
-            "task_completed": tool == "finish_investigation",
             "function": {"tool": tool, **arguments},
         }
     )
@@ -385,3 +387,18 @@ def test_a_trace_the_agent_wrote_is_the_one_replay_reads(tmp_path: Path) -> None
     assert [call["tool"] for call in task["calls"]] == ["get_entity", "finish_investigation"]
     assert task["calls"][0]["result"]["id"] == "entity-1"
     assert task["verdict"] == "malicious"
+
+
+def test_system_prompt_names_the_knowledge_tool_and_the_report() -> None:
+    """The model learns about the local vocabulary and the report from the prompt (ADR 0017)."""
+    assert f"`{KNOWLEDGE_TOOL}`" in SYSTEM_PROMPT
+    assert f"`{FINISH_TOOL}`" in SYSTEM_PROMPT
+
+
+def test_system_prompt_leaves_tools_to_the_catalog_and_reward_out() -> None:
+    """Runtime tools come from `available_tools` (ADR 0003); reward is offline only (ADR 0006)."""
+    # Plain words such as "search" may appear as words; compound tool names may not.
+    runtime_tools = {tool for tool in PRACTICE_ARGUMENT_MODELS if "_" in tool} - {FINISH_TOOL}
+
+    assert [tool for tool in runtime_tools if re.search(rf"\b{tool}\b", SYSTEM_PROMPT)] == []
+    assert "reward" not in SYSTEM_PROMPT.lower()

@@ -136,7 +136,6 @@ def test_step_schema_keeps_tool_definitions_resolvable() -> None:
     assert schema["required"] == [
         "current_state",
         "plan_remaining_steps_brief",
-        "task_completed",
         "function",
     ]
 

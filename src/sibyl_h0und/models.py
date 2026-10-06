@@ -330,11 +330,17 @@ class ToolCall(BaseModel):
 
 
 class StepEnvelope(StrictModel):
-    """Reasoning fields of a step, shared by every tool catalog."""
+    """Reasoning fields of a step, shared by every tool catalog.
+
+    Envelope keys the agent does not read, such as a `task_completed` left over
+    from older contracts, are dropped instead of failing the step (ADR 0009);
+    the step schema still closes the envelope.
+    """
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     current_state: str
     plan_remaining_steps_brief: list[str] = Field(min_length=1, max_length=5)
-    task_completed: bool
 
 
 class NextStep(StepEnvelope):
