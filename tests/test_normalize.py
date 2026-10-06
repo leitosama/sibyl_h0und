@@ -2,7 +2,14 @@ import base64
 
 import pytest
 
-from sibyl_h0und.normalize import command_line, domain, program_name, registry_path, windows_path
+from sibyl_h0und.normalize import (
+    command_line,
+    domain,
+    file_key,
+    program_name,
+    registry_path,
+    windows_path,
+)
 
 
 @pytest.mark.parametrize(
@@ -118,3 +125,20 @@ def test_registry_path_gives_one_form_for_the_spellings_of_a_key(
     value: object, expected: str | None
 ) -> None:
     assert registry_path(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("C:\\Windows\\Temp\\RTCore64.SYS", "rtcore64.sys"),
+        ("version", "version"),
+        ("A" * 64, "a" * 64),
+        (" " + "Ab" * 20 + " ", "ab" * 20),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_file_key_keeps_a_digest_whole_and_reduces_anything_else_to_a_name(
+    value: object, expected: str | None
+) -> None:
+    assert file_key(value) == expected

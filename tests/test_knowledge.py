@@ -11,7 +11,9 @@ from build_attack_pack import build as build_attack  # noqa: E402
 from build_forensicartifacts_pack import build as build_autostart  # noqa: E402
 from build_gtfoargs_pack import build as build_gtfoargs  # noqa: E402
 from build_gtfobins_pack import build as build_gtfobins  # noqa: E402
+from build_hijacklibs_pack import build as build_hijacklibs  # noqa: E402
 from build_lolbas_pack import build  # noqa: E402
+from build_loldrivers_pack import build as build_loldrivers  # noqa: E402
 from build_lolrmm_pack import build as build_lolrmm  # noqa: E402
 from build_wtfbins_pack import build as build_wtfbins  # noqa: E402
 
@@ -279,3 +281,56 @@ def test_autostart_build_follows_groups_and_keeps_only_matchable_keys(tmp_path: 
     assert pack.lookup("HKLM\\Software\\Winlogon")[0]["value"] == "Shell"
     assert pack.lookup("HKLM\\Software\\Other") is None
     assert len(pack.entries) == 2
+
+
+def test_loldrivers_build_keys_drivers_by_sys_name_and_sha256_only(tmp_path: Path) -> None:
+    """A product name in the tags is no file name; a hash finds its driver, a name all of them."""
+    sha = "ab" * 32
+    drivers = [
+        {
+            "Id": "id-1",
+            "Category": "vulnerable driver",
+            "MitreID": "T1068",
+            "Tags": ["Evil.sys", "Some Product"],
+            "Commands": {"Usecase": "Elevate privileges", "Description": "Exposes memory."},
+            "KnownVulnerableSamples": [{"OriginalFilename": "orig.sys", "SHA256": sha.upper()}],
+        },
+        {"Id": "id-2", "Tags": ["evil.sys"], "Commands": [{"Usecase": "x"}]},
+        {"Tags": ["no-id.sys"]},
+    ]
+    pack = read_pack(write(tmp_path / "d.json", build_loldrivers(drivers, b"x", "x")))
+
+    assert [pack.documents[i]["id"] for i in pack.lookup("C:\\Temp\\EVIL.SYS")] == ["id-1", "id-2"]
+    assert [pack.documents[i]["id"] for i in pack.lookup(sha)] == ["id-1"]
+    assert pack.lookup("orig.sys") == [0]
+    assert pack.lookup("Some Product") is None
+    assert pack.lookup("no-id.sys") is None
+    assert pack.documents[0]["use"] == "Elevate privileges"
+
+
+def test_hijacklibs_build_keeps_the_legitimate_location_and_caps_the_executables(
+    tmp_path: Path,
+) -> None:
+    """The executables list is shortened, with its true size kept."""
+    executables = "".join(
+        f"- {{Path: '%SYSTEM32%\\\\a{n}.exe', Type: Sideloading}}\n" for n in range(15)
+    )
+    entry = (
+        "Name: Version.dll\nVendor: Microsoft\nCVE: CVE-2000-1\n"
+        "ExpectedLocations:\n- '%SYSTEM32%'\nVulnerableExecutables:\n" + executables
+    )
+    pack = read_pack(
+        write(
+            tmp_path / "h.json",
+            build_hijacklibs(
+                {"yml/microsoft/built-in/version.yml": entry, "yml/x/bad.yml": "[]"}, "x"
+            ),
+        )
+    )
+
+    (found,) = pack.lookup("C:\\Users\\Public\\VERSION.dll")
+    assert found["expected_locations"] == ["%SYSTEM32%"]
+    assert (len(found["vulnerable_executables"]), found["vulnerable_executables_total"]) == (10, 15)
+    assert found["cve"] == "CVE-2000-1"
+    assert found["url"] == "https://hijacklibs.net/entries/microsoft/built-in/version.html"
+    assert len(pack.entries) == 1

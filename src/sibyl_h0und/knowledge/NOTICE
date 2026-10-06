@@ -55,3 +55,18 @@ forensicartifacts_autostart.json
   Use: Windows registry keys and values of the persistence and services artifacts,
   with each artifact's name, the opening of its description and its source URLs,
   reduced by scripts/build_forensicartifacts_pack.py.
+
+loldrivers.json
+  Source: LOLDrivers, https://www.loldrivers.io/
+  Repository: https://github.com/magicsword-io/LOLDrivers
+  Licence: Apache License 2.0
+  Use: driver file names and SHA-256 hashes, with each driver's id, category, ATT&CK id,
+  use, the opening of its description and its page, reduced by
+  scripts/build_loldrivers_pack.py.
+
+hijacklibs.json
+  Source: HijackLibs, https://hijacklibs.net/
+  Repository: https://github.com/wietze/HijackLibs
+  Licence: GNU General Public License v3.0
+  Use: DLL names with the vendor, the expected locations, the CVE, the first vulnerable
+  executables and the page of each entry, reduced by scripts/build_hijacklibs_pack.py.

@@ -255,6 +255,20 @@ def unix_program(value: Any) -> str | None:
     return (name.removesuffix(".exe") or None) if name else None
 
 
+def file_key(value: Any) -> str | None:
+    """Return a file's lookup key: a hex digest in lower case, else its lower-cased name.
+
+    An MD5, SHA-1 or SHA-256 digest stays whole; any other value is reduced to its
+    file name as `program_name` does, but without adding `.exe`, so `RTCore64.sys` and
+    a path ending in it give the same key.
+    """
+    if isinstance(value, str) and re.fullmatch(
+        r"[0-9a-fA-F]{32}|[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", value.strip()
+    ):
+        return value.strip().lower()
+    return program_name(value, exe=False)
+
+
 def attack_id(value: Any) -> str | None:
     """Return an upper-cased ATT&CK technique (`T1036.003`) or software (`S0195`) id."""
     if not isinstance(value, str):
@@ -268,6 +282,7 @@ KEY_NORMALIZERS: dict[str, Callable[[Any], str | None]] = {
     "program": program_name,
     "path": windows_path,
     "registry": registry_path,
+    "file": file_key,
     "domain": domain,
     "attack_id": attack_id,
     "unix_program": unix_program,

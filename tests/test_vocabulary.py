@@ -2,6 +2,7 @@ from typing import Any
 
 import pytest
 
+from sibyl_h0und.knowledge import load_pack
 from sibyl_h0und.nextron import extension_row, location_row, user_row
 from sibyl_h0und.vocabulary import shared
 
@@ -171,3 +172,36 @@ def test_a_key_with_no_autostart_entry_gets_no_answer_and_no_verdict() -> None:
 )
 def test_benign_build_and_programdata_paths_get_no_autostart_entry(query: str) -> None:
     assert "forensicartifacts" not in sources(shared().lookup(query))
+
+
+def test_a_driver_is_found_by_file_name_under_any_path_and_by_sha256() -> None:
+    by_name = shared().lookup("C:\\Windows\\Temp\\RTCore64.SYS")
+    (loldrivers,) = [m for m in by_name["matches"] if m["source"] == "loldrivers"]
+    digest = next(key for key in load_pack("loldrivers").entries if len(key) == 64)
+    (by_hash,) = [
+        m for m in shared().lookup(digest.upper())["matches"] if m["source"] == "loldrivers"
+    ]
+
+    assert loldrivers["matched_on"] == "name"
+    assert all({"id", "category", "url"} <= set(driver) for driver in loldrivers["drivers"])
+    assert by_hash["matched_on"] == "sha256"
+
+
+def test_a_dll_name_brings_where_its_legitimate_copy_lives() -> None:
+    """The model compares the path it saw with the locations the source states."""
+    (match,) = [
+        m
+        for m in shared().lookup("C:\\Users\\Public\\Version.dll")["matches"]
+        if m["source"] == "hijacklibs"
+    ]
+
+    assert match["name"] == "version.dll"
+    assert "%SYSTEM32%" in match["entries"][0]["expected_locations"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["C:\\AzAgent\\_work\\1\\s\\bin\\app.dll", "C:\\ProgramData\\x\\helper.sys", "hidusb.sys"],
+)
+def test_benign_drops_get_no_driver_or_dll_entry(query: str) -> None:
+    assert not sources(shared().lookup(query)) & {"loldrivers", "hijacklibs"}
