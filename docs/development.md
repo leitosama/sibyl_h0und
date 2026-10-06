@@ -48,7 +48,8 @@ uv run pytest
 ## Бенчи
 
 - Тренируемся на арене `practice` (`SCENARIO_RUNTIME_ARENA=practice`).
-  Одновременно открыт только один run, частота запусков ограничена.
+  Одновременно активно до 10 run'ов, в каждом по одной задаче, и не больше
+  10 новых run'ов за 30 минут (см. [competition.md](competition.md)).
 - Сравниваем `total_reward`, `quality_score`, `efficiency_score` и `tool_calls`
   по задачам до и после изменения.
 - В `tests/fixtures/` храним 1–2 обезличенные задачи с ответами инструментов
