@@ -7,8 +7,13 @@ Location, User Context and Form / Type rows in our own words. The sheet gives
 no way to combine the rows, so summing them is our choice.
 
 The sheet describes a file that an antivirus flagged. Where we rate a running
-process, a Windows system directory is the normal home of its image, so it
-rates 0 there instead of 2.
+process:
+
+- a Windows system directory is the normal home of its image, so it rates 0
+  there instead of 2;
+- every rating moves one step down (relevant becomes less relevant, highly
+  relevant becomes relevant), because replaying the practice traces showed that
+  full-scale ratings fire on far more benign processes than wrong ones.
 """
 
 import re
@@ -142,15 +147,26 @@ NEXTRON_FILE = ScoreRule(
     high_at=4,
 )
 
+
+def lowered(rating: int | None) -> int | None:
+    """Move a rating one step down the scale, keeping an unrated attribute unrated."""
+    return None if rating is None else max(rating - 1, 0)
+
+
 NEXTRON_PROCESS = ScoreRule(
     name="nextron_process",
     node_types=PROCESS_TYPES,
     attributes=(
-        Attribute("location", lambda p: location_rating(p.get("image_path"), executed=True)),
-        Attribute("user", user_rating),
+        Attribute(
+            "location", lambda p: lowered(location_rating(p.get("image_path"), executed=True))
+        ),
+        Attribute("user", lambda p: lowered(user_rating(p))),
     ),
-    medium_at=3,
-    high_at=4,
+    # Lowered ratings sum to 2 at most. A single top rating, an administrative
+    # or service account, is too common to flag: on the practice traces it
+    # fired on most benign tasks as often as on wrong ones.
+    medium_at=2,
+    high_at=2,
 )
 
 NEXTRON_RULES = (NEXTRON_FILE, NEXTRON_PROCESS)
