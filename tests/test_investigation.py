@@ -104,6 +104,55 @@ def test_evidence_comes_with_open_ids_and_a_repeat_gets_only_the_evidence() -> N
     assert "note" in repeat.feedback
 
 
+SCOPED_SEARCH = {
+    "name": "find",
+    "parameters": {
+        "$defs": {
+            "RelationSearchScope": {
+                "type": "object",
+                "properties": {"kind": {"const": "relation"}, "type": {"type": "string"}},
+            }
+        },
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "scope": {"anyOf": [{"$ref": "#/$defs/RelationSearchScope"}, {"type": "null"}]},
+        },
+        "required": ["query"],
+    },
+}
+PROCESS = {**DROPPED_FILE, "relation_ids": {"incoming": [], "outgoing": ["rel-1", "rel-2"]}}
+
+
+def fetch_process(investigation: Investigation) -> dict[str, Any]:
+    """Fetch the alert entity, which has two open relations, and return `still_open`."""
+    sent = investigation.before_call("get_entity", get_entity())
+    assert isinstance(sent, Send)
+    reply = investigation.after_call("get_entity", sent.arguments, ToolOutcome("ok", PROCESS))
+    return reply.feedback["still_open"]
+
+
+def test_a_fetched_entity_with_open_relations_points_to_the_catalogs_relation_search() -> None:
+    """The advice names the task's own search, once, on the reply that fetched the entity."""
+    investigation = Investigation(observation([*CATALOG, SCOPED_SEARCH]))
+
+    still_open = fetch_process(investigation)
+    later = investigation.after_call(
+        "find", {"query": "run.ps1"}, ToolOutcome("ok", {"results": []})
+    )
+
+    assert still_open["list_relations_with"].startswith("find with this entity's full id")
+    assert "list_relations_with" not in later.feedback["still_open"]
+
+
+def test_no_relation_search_advice_without_such_a_tool() -> None:
+    """A task without a relation-scoped search is never told to use one."""
+    still_open = fetch_process(Investigation(observation()))
+
+    assert still_open["entities_with_open_relations"]
+    assert "list_relations_with" not in still_open
+
+
 def test_a_runtime_error_teaches_nothing() -> None:
     """An error response is not learned from, even if it echoes a node."""
     investigation = Investigation(observation())

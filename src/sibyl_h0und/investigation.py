@@ -78,6 +78,8 @@ class Investigation:
         self._ledger = GraphLedger()
         self._ledger.observe_alert(self.alert)
         self._vocabulary = shared()
+        # A search scoped to a relation type lists an entity's relations by its id.
+        self._relation_search = self.catalog.relation_search()
 
     def opening_message(self) -> dict[str, Any]:
         """Return the first user message: the alert and the tool catalog, once."""
@@ -159,5 +161,15 @@ class Investigation:
         self._ledger.record(tool, arguments, outcome)
         feedback = outcome.evidence()
         if open_items := self._ledger.summary():
+            fetched = arguments.get("entity_id")
+            opened = open_items.get("entities_with_open_relations", [])
+            if self._relation_search and any(item["entity_id"] == fetched for item in opened):
+                # Said once per fetched entity, where the model picks how to open them.
+                open_items["list_relations_with"] = (
+                    f"{self._relation_search} with this entity's full id as `query` returns "
+                    "its relations in full with their types; keep those whose source or "
+                    "target is this entity. For an entity with many relations, limit "
+                    "`scope` to one relation type."
+                )
             feedback["still_open"] = open_items
         return Reply(feedback)
