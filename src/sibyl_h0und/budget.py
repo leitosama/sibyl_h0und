@@ -14,7 +14,8 @@ RUNTIME_CALL_LIMIT = 100
 DEFAULT_MAX_RUNTIME_CALLS = 95
 # Locally answered turns in a row after which the model must finish. This is
 # a stall guard, not an economy limit: it spends no runtime calls and fires
-# only when the model loops on calls that bring no new evidence (ADR 0009).
+# only when the model loops on local answers: rejected or repeated calls, or
+# more than this many knowledge lookups with no runtime call between (ADR 0009).
 MAX_LOCAL_STREAK = 20
 # Turns the model gets to produce an accepted report once it must finish.
 MAX_FINISH_TURNS = 5

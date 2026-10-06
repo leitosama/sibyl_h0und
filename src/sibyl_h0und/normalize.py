@@ -1,9 +1,9 @@
-"""Normalization shared by rules and knowledge packs.
+"""Normalization shared by the vocabulary and the knowledge pack builders.
 
-Rules and pack builders reduce raw values to the same keys, so a lookup made
-at runtime finds the entry the build script stored. Every function accepts
+The vocabulary and the pack builders reduce raw values to the same keys, so a
+lookup made at runtime finds the entry the build script stored. Every function accepts
 any value and returns `None` (or an empty result) when the value cannot be
-normalized, so rules need no type checks of their own.
+normalized, so callers need no type checks of their own.
 """
 
 import base64
@@ -19,6 +19,7 @@ POWERSHELL_IMAGES = frozenset({"powershell.exe", "pwsh.exe", "powershell_ise.exe
 # Option prefixes on Windows command lines. A slash also starts Unix paths, so
 # only a short token such as `/c` or `/s:value` counts as a slash option.
 _SLASH_OPTION = re.compile(r"^/[a-z?][\w-]{0,30}(?:[:=].*)?$", re.IGNORECASE)
+_ATTACK_ID = re.compile(r"^(?:T\d{4}(?:\.\d{3})?|S\d{4})$")
 _DOMAIN = re.compile(r"^(?=.{1,253}$)([a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$")
 
 
@@ -208,9 +209,31 @@ def domain(value: Any) -> str | None:
     return text
 
 
+def unix_program(value: Any) -> str | None:
+    """Return the lower-cased base name of a Unix program, without a `.exe` suffix.
+
+    `/usr/bin/Curl` and `curl.exe` both give `curl`. Unlike `program_name`, no
+    extension is added, because Unix programs have none.
+    """
+    if not isinstance(value, str) or not (path := value.strip().strip('"').strip()):
+        return None
+    name = path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].strip().lower()
+    return (name.removesuffix(".exe") or None) if name else None
+
+
+def attack_id(value: Any) -> str | None:
+    """Return an upper-cased ATT&CK technique (`T1036.003`) or software (`S0195`) id."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip().upper()
+    return text if _ATTACK_ID.match(text) else None
+
+
 # Normalizers a knowledge pack can name as its key.
 KEY_NORMALIZERS: dict[str, Callable[[Any], str | None]] = {
     "program": program_name,
     "path": windows_path,
     "domain": domain,
+    "attack_id": attack_id,
+    "unix_program": unix_program,
 }

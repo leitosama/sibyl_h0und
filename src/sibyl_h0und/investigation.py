@@ -1,24 +1,22 @@
 """Everything one task knows about its investigation, behind two operations.
 
 The agent loop asks `before_call` what to do with the model's call and gives
-the runtime's answer to `after_call`. The tool catalog, GraphLedger,
-FlagBoard, the `still_open` and `flags` merge, the wording of local answers and
-the trace events of those decisions all live here. Replay feeds recorded
-outcomes through `after_call`, so it sees what the model would have seen.
+the runtime's answer to `after_call`. The tool catalog, GraphLedger, the
+`still_open` merge, the local knowledge lookup, the wording of local answers
+and the trace events of those decisions all live here.
 """
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
 from loguru import logger
 
 from sibyl_h0und.catalog import FINISH_TOOL, ToolCatalog
-from sibyl_h0und.flags import Finding, FlagBoard, flag_lines, rank_flags
 from sibyl_h0und.ledger import GraphLedger
 from sibyl_h0und.llm import render_json
 from sibyl_h0und.outcome import ToolOutcome, decode_json
-from sibyl_h0und.rules import DEFAULT_RULES
 from sibyl_h0und.trace import TaskTrace
+from sibyl_h0und.vocabulary import KNOWLEDGE_TOOL, KNOWLEDGE_TOOL_SPEC, shared
 
 # Observation fields that repeat in every response and are not part of the alert.
 NON_ALERT_FIELDS = frozenset({"available_tools", "last_tool_result"})
@@ -52,27 +50,25 @@ class Reply:
 
     Attributes:
         feedback: Tool message content for the model.
-        shown: Findings that reached the model after the per-result limit.
     """
 
     feedback: dict[str, Any]
-    shown: tuple[Finding, ...] = ()
 
 
 class Investigation:
     """Per-task state and rules that turn tool calls and responses into messages."""
 
     def __init__(self, observation: dict[str, Any], trace: TaskTrace | None = None) -> None:
-        """Build the catalog, ledger and flag board of one task.
+        """Build the catalog, ledger and knowledge vocabulary of one task.
 
         Args:
             observation: Public task observation with a JSON-encoded `available_tools`.
-            trace: Task trace that receives the events of local decisions and flags.
+            trace: Task trace that receives the events of local decisions.
 
         Raises:
             ValueError: If the observation has an invalid tool catalog.
         """
-        self.catalog = ToolCatalog.from_observation(observation)
+        self.catalog = ToolCatalog.from_observation(observation, local_tools=[KNOWLEDGE_TOOL_SPEC])
         self.trace = trace or TaskTrace(None)
         self.alert = {
             key: decode_json(value)
@@ -81,12 +77,7 @@ class Investigation:
         }
         self._ledger = GraphLedger()
         self._ledger.observe_alert(self.alert)
-        self._board = FlagBoard(DEFAULT_RULES)
-
-    @property
-    def findings(self) -> list[Finding]:
-        """The latest finding of each rule about each node, so far."""
-        return list(self._board.findings.values())
+        self._vocabulary = shared()
 
     def opening_message(self) -> dict[str, Any]:
         """Return the first user message: the alert and the tool catalog, once."""
@@ -107,8 +98,8 @@ class Investigation:
         """Decide whether the model's call reaches the runtime.
 
         A tool outside the catalog or outside the allowed set, arguments that
-        break the tool's schema, an id the runtime never returned and a repeated
-        call are answered locally.
+        break the tool's schema, a knowledge lookup, an id the runtime never
+        returned and a repeated call are answered locally.
 
         Args:
             tool: Tool the model chose.
@@ -140,6 +131,10 @@ class Investigation:
             logger.warning("Rejected invalid {} arguments locally: {}", tool, problem)
             self.trace.local_answer("tool_invalid", tool, arguments, feedback)
             return LocalAnswer(feedback)
+        if tool == KNOWLEDGE_TOOL and self.catalog.is_local(tool):
+            feedback = self._vocabulary.lookup(arguments["query"])
+            self.trace.local_answer("tool_knowledge", tool, arguments, feedback)
+            return LocalAnswer(feedback)
         decision = self._ledger.check(tool, arguments)
         if decision.feedback is not None:
             logger.warning("Answered {} locally: {}.", tool, decision.reason)
@@ -151,9 +146,7 @@ class Investigation:
         """Learn from a runtime answer and build the message the model sees.
 
         The message carries the evidence, then `still_open` for what is known
-        but not yet visited and `flags` for fresh findings. A failed call is
-        not judged. The ledger caches the evidence alone, so a repeated call
-        gets no flags twice.
+        but not yet visited. The ledger caches the evidence alone.
 
         Args:
             tool: Tool that was called.
@@ -161,18 +154,10 @@ class Investigation:
             outcome: The runtime's answer to a non-terminal call.
 
         Returns:
-            The tool message content and the findings that reached the model.
+            The tool message content.
         """
         self._ledger.record(tool, arguments, outcome)
         feedback = outcome.evidence()
         if open_items := self._ledger.summary():
             feedback["still_open"] = open_items
-        if outcome.failed:
-            return Reply(feedback)
-        fresh = self._board.observe(outcome.result)
-        if fresh:
-            self.trace.flags(tool, [asdict(finding) for finding in fresh])
-        groups, omitted = rank_flags(fresh)
-        if lines := flag_lines(groups, omitted):
-            feedback["flags"] = lines
-        return Reply(feedback, tuple(finding for group in groups for finding in group))
+        return Reply(feedback)

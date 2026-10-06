@@ -13,7 +13,7 @@ from bluesec1_client import (
 )
 from sibyl_h0und.agent import SimpleSGRAgent
 from sibyl_h0und.models import NextStep
-from sibyl_h0und.replay import load_tasks, replay
+from sibyl_h0und.replay import load_tasks
 from sibyl_h0und.trace import TaskTrace
 
 # A catalog entry with a marker that shows where the catalog reaches the LLM.
@@ -320,39 +320,27 @@ def test_ledger_answers_invented_ids_and_repeats_without_the_runtime(tmp_path: P
     assert events[-1]["runtime_calls"] == 2
 
 
-class DroppedFileSession(FakeSession):
-    """Session whose only entity is a script dropped into a public directory."""
-
-    @staticmethod
-    def entity_result(arguments: dict[str, Any]) -> dict[str, Any]:
-        """Return a high-scoring file entity."""
-        return {
-            "id": arguments["entity_id"],
-            "type": "windows_file",
-            "properties": {"path": "C:\\Windows\\System32\\run.ps1"},
-        }
-
-
-def test_flags_reach_the_model_and_the_trace(tmp_path: Path) -> None:
-    """A finding reaches the model next to the evidence it explains and is traced.
-
-    What a rule rates and how it words the reason belong to test_flags; here
-    only the delivery is checked, so retuning a rule does not break this test.
-    """
-    llm = FakeStepClient([get_entity_step("entity-1"), investigation_steps()[1]])
+def test_knowledge_lookup_is_answered_locally_and_costs_no_runtime_call(tmp_path: Path) -> None:
+    """The model sees the lookup tool, calls it, and gets the vocabulary's answer."""
+    llm = FakeStepClient(
+        [make_step("lookup_knowledge", query="sdelete.exe"), investigation_steps()[1]]
+    )
+    session = FakeSession()
     agent = SimpleSGRAgent(llm, trace_dir=tmp_path)
 
-    asyncio.run(agent.run(cast(RemoteBenchmarkClient, FakeClient(DroppedFileSession()))))
+    asyncio.run(agent.run(cast(RemoteBenchmarkClient, FakeClient(session))))
 
-    feedback = json.loads(llm.requests[1][-1]["content"])
-    assert feedback["result"]["id"] == "entity-1"
-    (line,) = feedback["flags"]
-    assert (line["id"], line["type"]) == ("entity-1", "windows_file")
-    assert line["why"]
+    assert [name for name, _ in session.calls] == ["finish_investigation"]
+    opening = json.loads(llm.requests[0][1]["content"])
+    assert "lookup_knowledge" in [tool["name"] for tool in opening["available_tools"]]
+    offered = llm.formats[0]["json_schema"]["schema"]["properties"]["function"]["anyOf"]
+    assert "lookup_knowledge" in [option["properties"]["tool"]["enum"][0] for option in offered]
+    answer = json.loads(llm.requests[1][-1]["content"])
+    assert answer["query"] == "sdelete.exe"
+    assert answer["matches"]
     (run_dir,) = tmp_path.iterdir()
-    events = read_events(run_dir / "001_task-1.trace.jsonl")
-    (flags_event,) = [event for event in events if event["kind"] == "flags"]
-    assert {finding["node_id"] for finding in flags_event["payload"]["findings"]} == {"entity-1"}
+    kinds = [event["kind"] for event in read_events(run_dir / "001_task-1.trace.jsonl")]
+    assert "tool_knowledge" in kinds
 
 
 def test_agent_reserves_the_last_runtime_call_for_the_report(tmp_path: Path) -> None:
@@ -386,18 +374,14 @@ def test_agent_reserves_the_last_runtime_call_for_the_report(tmp_path: Path) -> 
     assert kinds.count("finish_only") == 1
 
 
-def test_a_trace_the_agent_wrote_replays_to_what_the_model_saw(tmp_path: Path) -> None:
-    """The trace the agent writes is the one replay reads, and both judge it alike."""
-    llm = FakeStepClient([get_entity_step("entity-1"), investigation_steps()[1]])
+def test_a_trace_the_agent_wrote_is_the_one_replay_reads(tmp_path: Path) -> None:
+    """Replay reads the runtime calls the agent traced, not the local lookups."""
+    llm = FakeStepClient([make_step("lookup_knowledge", query="x"), *investigation_steps()])
     agent = SimpleSGRAgent(llm, trace_dir=tmp_path / "traces")
-    asyncio.run(agent.run(cast(RemoteBenchmarkClient, FakeClient(DroppedFileSession()))))
+    asyncio.run(agent.run(cast(RemoteBenchmarkClient, FakeClient(FakeSession()))))
 
     (task,) = load_tasks(tmp_path / "traces", tmp_path / "cache")
-    findings, shown = replay([task])
 
     assert [call["tool"] for call in task["calls"]] == ["get_entity", "finish_investigation"]
     assert task["calls"][0]["result"]["id"] == "entity-1"
     assert task["verdict"] == "malicious"
-    seen = json.loads(llm.requests[1][-1]["content"])["flags"]
-    assert [finding.node_id for finding in shown["run-1:task-1"]] == [line["id"] for line in seen]
-    assert {finding.node_id for finding in findings["run-1:task-1"]} == {"entity-1"}

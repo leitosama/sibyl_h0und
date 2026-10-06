@@ -43,18 +43,26 @@ TOOL_KEY = "tool"
 class ToolCatalog:
     """Tools advertised by one task and the step schemas that allow calling them."""
 
-    def __init__(self, specs: list[dict[str, Any]]) -> None:
+    def __init__(
+        self, specs: list[dict[str, Any]], local_tools: Iterable[dict[str, Any]] = ()
+    ) -> None:
         """Index the advertised tools and resolve each argument schema.
 
         Args:
             specs: Decoded `available_tools` entries.
+            local_tools: Entries of tools the agent answers itself. Each is
+                added to the catalog unless the runtime already advertises a
+                tool of that name: the runtime's tool wins (ADR 0003).
 
         Raises:
             ValueError: If the catalog has no `finish_investigation`.
         """
-        self.specs = specs
+        runtime_names = {_tool_name(spec) for spec in specs}
+        added = [spec for spec in local_tools if _tool_name(spec) not in runtime_names]
+        self.local_names = frozenset(_tool_name(spec) for spec in added)
+        self.specs = [*specs, *added]
         self._schemas: dict[str, dict[str, Any] | None] = {}
-        for spec in specs:
+        for spec in self.specs:
             name = _tool_name(spec)
             if name is not None and name not in self._schemas:
                 self._schemas[name] = _argument_schema(name, spec)
@@ -68,11 +76,14 @@ class ToolCatalog:
         }
 
     @classmethod
-    def from_observation(cls, observation: dict[str, Any]) -> "ToolCatalog":
+    def from_observation(
+        cls, observation: dict[str, Any], local_tools: Iterable[dict[str, Any]] = ()
+    ) -> "ToolCatalog":
         """Decode the catalog from a task observation.
 
         Args:
             observation: Public task observation with a JSON-encoded `available_tools`.
+            local_tools: Entries of tools the agent answers itself.
 
         Returns:
             The task's tool catalog.
@@ -90,12 +101,16 @@ class ToolCatalog:
             raise ValueError("available_tools is not valid JSON.") from exc
         if not isinstance(specs, list) or not all(isinstance(spec, dict) for spec in specs):
             raise ValueError("available_tools must encode a list of tool specifications.")
-        return cls([dict(spec) for spec in specs])
+        return cls([dict(spec) for spec in specs], local_tools)
 
     @property
     def names(self) -> list[str]:
         """Names of the advertised tools in catalog order."""
         return list(self._schemas)
+
+    def is_local(self, tool_name: str) -> bool:
+        """Tell whether the agent answers a catalog tool itself."""
+        return tool_name in self.local_names
 
     def __contains__(self, tool_name: object) -> bool:
         """Tell whether the task advertises a tool."""

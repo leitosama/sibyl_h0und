@@ -144,7 +144,8 @@ class TaskTrace:
         """Write a call answered without the runtime.
 
         Args:
-            kind: `tool_rejected`, `tool_invalid` or `tool_cached`.
+            kind: `tool_rejected`, `tool_invalid`, `tool_cached` or `tool_knowledge`
+                (the lookup and its answer).
             tool: Tool the model asked for.
             arguments: Arguments of the call.
             feedback: Answer shown to the model, if it is worth keeping.
@@ -168,10 +169,6 @@ class TaskTrace:
             truncated=response.get("truncated"),
             payload={"arguments": arguments, "response": response},
         )
-
-    def flags(self, tool: str, findings: list[dict[str, Any]]) -> None:
-        """Write the findings a tool result produced."""
-        self.event("flags", tool=tool, payload={"findings": findings})
 
     def task_end(self, task_result: dict[str, Any], error: str | None) -> None:
         """Write the closing summary line with the authoritative result and counters."""
