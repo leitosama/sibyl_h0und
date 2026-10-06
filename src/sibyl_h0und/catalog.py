@@ -11,9 +11,12 @@ import json
 from collections.abc import Iterable
 from typing import Any
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError, best_match
+from jsonschema.validators import validator_for
 from loguru import logger
 
-from sibyl_h0und.models import PRACTICE_ARGUMENT_MODELS, StepEnvelope
+from sibyl_h0und.models import PRACTICE_ARGUMENT_MODELS, StepEnvelope, normalize_time_windows
 
 FINISH_TOOL = "finish_investigation"
 RESPONSE_FORMAT_NAME = "bluesec1_next_step"
@@ -58,6 +61,11 @@ class ToolCatalog:
         if FINISH_TOOL not in self._schemas:
             raise ValueError("The runtime did not advertise finish_investigation.")
         self._formats: dict[frozenset[str], dict[str, Any]] = {}
+        self._validators = {
+            name: _validator(name, schema)
+            for name, schema in self._schemas.items()
+            if schema is not None
+        }
 
     @classmethod
     def from_observation(cls, observation: dict[str, Any]) -> "ToolCatalog":
@@ -93,6 +101,41 @@ class ToolCatalog:
         """Tell whether the task advertises a tool."""
         return tool_name in self._schemas
 
+    def prepare(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Turn the model's arguments into the call the runtime receives.
+
+        Calendar-day time windows become whole UTC days, omitted arguments
+        take their schema defaults, so equal calls look equal to the ledger,
+        and the result is checked against the tool's own argument schema.
+
+        Args:
+            tool_name: Advertised tool name.
+            arguments: Arguments the model chose, without nulls.
+
+        Returns:
+            Arguments to send.
+
+        Raises:
+            ValueError: If the arguments break the tool's schema; the call is
+                answered locally instead of costing a runtime call.
+        """
+        prepared = normalize_time_windows(arguments)
+        schema = self._schemas.get(tool_name)
+        if schema is None:
+            return prepared
+        defaults = {
+            key: value["default"]
+            for key, value in (schema.get("properties") or {}).items()
+            if isinstance(value, dict) and value.get("default") is not None
+        }
+        prepared = {**copy.deepcopy(defaults), **prepared}
+        validator = self._validators.get(tool_name)
+        error = best_match(validator.iter_errors(prepared)) if validator is not None else None
+        if error is not None:
+            where = "/".join(str(part) for part in error.absolute_path) or "arguments"
+            raise ValueError(f"Invalid {tool_name} arguments at {where}: {error.message}")
+        return prepared
+
     def response_format(self, tools: Iterable[str] | None = None) -> dict[str, Any]:
         """Build the strict `json_schema` response format of one step.
 
@@ -127,6 +170,7 @@ class ToolCatalog:
             "anyOf": branches,
             "description": "Execute the first remaining step.",
         }
+        schema["required"] = list(schema["properties"])
         _strict_object(schema)
         if definitions:
             schema["$defs"] = definitions
@@ -152,12 +196,13 @@ def _argument_schema(name: str, spec: dict[str, Any]) -> dict[str, Any] | None:
         spec: Catalog entry.
 
     Returns:
-        An object schema with `properties`, or `None` when the tool's
-        arguments are unknown and the model may send any.
+        An object schema with `properties` (empty for a tool without
+        arguments), or `None` when the arguments are unknown and free.
     """
     holders = [spec]
     if isinstance(spec.get("function"), dict):
         holders.append(spec["function"])
+    closed_without_properties = False
     for holder in holders:
         for key in ARGUMENT_SCHEMA_KEYS:
             schema = holder.get(key)
@@ -166,13 +211,32 @@ def _argument_schema(name: str, spec: dict[str, Any]) -> dict[str, Any] | None:
                     schema = json.loads(schema)
                 except json.JSONDecodeError:
                     continue
-            if isinstance(schema, dict) and isinstance(schema.get("properties"), dict):
+            if not isinstance(schema, dict):
+                continue
+            if isinstance(schema.get("properties"), dict):
                 return copy.deepcopy(schema)
+            if _is_object(schema) and not schema.get("additionalProperties"):
+                closed_without_properties = True
     if name in PRACTICE_ARGUMENT_MODELS:
         logger.warning("Catalog entry of {} has no argument schema; using the practice one.", name)
         return PRACTICE_ARGUMENT_MODELS[name].model_json_schema(by_alias=True)
+    if closed_without_properties:
+        # An object schema that names no properties is read as a tool without
+        # arguments, so the step schema stays strict for every other tool.
+        return {"type": "object", "properties": {}}
     logger.warning("Catalog entry of {} has no argument schema; its arguments are free.", name)
     return None
+
+
+def _validator(name: str, schema: dict[str, Any]) -> Any:
+    """Build the validator of one tool's original argument schema, if it is valid."""
+    validator_class = validator_for(schema, default=Draft202012Validator)
+    try:
+        validator_class.check_schema(schema)
+    except SchemaError as exc:
+        logger.warning("Argument schema of {} is invalid, arguments are not checked: {}", name, exc)
+        return None
+    return validator_class(schema)
 
 
 def _function_branch(
@@ -211,8 +275,6 @@ def _function_branch(
     properties = schema.get("properties") or {}
     if TOOL_KEY in properties:
         logger.warning("Tool {} has an argument named {!r}; it cannot be sent.", name, TOOL_KEY)
-    arguments = {key: value for key, value in properties.items() if key != TOOL_KEY}
-    required = set(schema.get("required") or [])
     branch = {
         key: value
         for key, value in schema.items()
@@ -221,8 +283,9 @@ def _function_branch(
     branch["type"] = "object"
     branch["properties"] = {
         TOOL_KEY: tool,
-        **{key: value if key in required else _nullable(value) for key, value in arguments.items()},
+        **{key: value for key, value in properties.items() if key != TOOL_KEY},
     }
+    branch["required"] = [TOOL_KEY, *(schema.get("required") or [])]
     strict = _make_strict([branch, *definitions.values()])
     return branch, definitions, strict
 
@@ -244,8 +307,16 @@ def _rename_refs(node: Any, prefix: str) -> None:
         _rename_refs(value, prefix)
 
 
+def _is_object(schema: dict[str, Any]) -> bool:
+    """Tell whether a schema describes an object, whatever form its `type` takes."""
+    kind = schema.get("type")
+    if kind is None:
+        return isinstance(schema.get("properties"), dict)
+    return kind == "object" or (isinstance(kind, list) and "object" in kind)
+
+
 def _nullable(schema: Any) -> Any:
-    """Allow `null` for an optional argument that strict mode makes required."""
+    """Allow `null` for an optional property that strict mode makes required."""
     if not isinstance(schema, dict) or _allows_null(schema):
         return schema
     return {"anyOf": [schema, {"type": "null"}]}
@@ -263,8 +334,9 @@ def _allows_null(schema: dict[str, Any]) -> bool:
 def _make_strict(node: Any) -> bool:
     """Normalize a schema in place for strict OpenAI-compatible providers.
 
-    Objects become closed with every property required, defaults and
-    discriminators are dropped, and `oneOf` becomes `anyOf`.
+    Objects at every depth become closed, with optional properties made
+    nullable and every property required; defaults and discriminators are
+    dropped, and `oneOf` becomes `anyOf`.
 
     Returns:
         Whether the schema is valid in strict mode: an object without
@@ -279,7 +351,7 @@ def _make_strict(node: Any) -> bool:
     if "oneOf" in node:
         node["anyOf"] = node.pop("oneOf")
     strict = True
-    if node.get("type") == "object":
+    if _is_object(node):
         if isinstance(node.get("properties"), dict):
             _strict_object(node)
         else:
@@ -293,6 +365,11 @@ def _make_strict(node: Any) -> bool:
 
 
 def _strict_object(node: dict[str, Any]) -> None:
-    """Close an object schema and require all its properties."""
+    """Close an object schema and require all its properties, optional ones as nullable."""
+    required = set(node.get("required") or [])
+    node["properties"] = {
+        key: value if key in required else _nullable(value)
+        for key, value in node["properties"].items()
+    }
     node["additionalProperties"] = False
     node["required"] = list(node["properties"])

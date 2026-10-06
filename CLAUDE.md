@@ -29,9 +29,10 @@ Each rule points to the ADR that explains it.
   hard-coded list: tools may differ on the competition day. (ADR 0003)
 - Every runtime tool call costs score, but quality outweighs it. Do not add
   calls that repeat a known entity or relation lookup, and do not add a step
-  budget to save calls. The only limit is a safety ceiling in code below the
-  runtime's 100 calls, counted in runtime calls, that leaves room for
-  `finish_investigation`. (ADR 0004, 0005)
+  budget to save calls. The only call limit is a safety ceiling in code below
+  the runtime's 100 calls, counted in runtime calls, that leaves room for
+  `finish_investigation`; the one other bound is a stall guard on locally
+  answered turns in a row, which spends no calls. (ADR 0004, 0005, 0015)
 - `finish_investigation` may cite only ids the runtime actually returned,
   and only entities that belong to the incident: extra report entities are
   penalized. (ADR 0005, 0013)

@@ -39,12 +39,16 @@ def test_a_stuck_model_must_finish_and_then_gives_up() -> None:
         budget.start_turn()
 
 
-def test_finish_retries_stop_before_the_runtime_limit() -> None:
-    """Retried reports never reach the runtime's own call limit."""
+def test_a_rejected_report_is_retried_up_to_the_runtime_limit() -> None:
+    """At the highest ceiling the report may be retried as the runtime's 100th call, not later."""
     budget = CallBudget(RUNTIME_CALL_LIMIT - 1)
-    budget.runtime_calls = RUNTIME_CALL_LIMIT - 2
+    while not budget.start_turn():
+        budget.record_runtime_call()
+    assert budget.runtime_calls == RUNTIME_CALL_LIMIT - 2
+
+    budget.record_runtime_call()  # The report is rejected as call 99.
     assert budget.start_turn() is True
-    budget.record_runtime_call()
+    budget.record_runtime_call()  # The retry is call 100.
 
     with pytest.raises(CallBudgetExhaustedError):
         budget.start_turn()

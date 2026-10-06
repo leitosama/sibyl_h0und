@@ -1,4 +1,5 @@
-from datetime import datetime
+import re
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -353,3 +354,64 @@ def _drop_nulls(value: Any) -> Any:
     if isinstance(value, list):
         return [_drop_nulls(item) for item in value]
     return value
+
+
+def normalize_time_windows(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Check and normalize every `time_window` argument at any depth.
+
+    A calendar day becomes the whole UTC day: `from` its first and `to` its
+    last microsecond. A timestamp must carry its timezone and is converted
+    to UTC. The window must not be inverted.
+
+    Args:
+        arguments: Tool arguments without nulls.
+
+    Returns:
+        A copy with each `{"from": ..., "to": ...}` window normalized.
+
+    Raises:
+        ValueError: If a boundary is malformed or the window is inverted.
+    """
+
+    def walk(value: Any, key: str | None = None) -> Any:
+        if isinstance(value, list):
+            return [walk(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        if key == "time_window":
+            lower = value.get("from")
+            upper = value.get("to")
+            window = dict(value)
+            if isinstance(lower, str):
+                window["from"] = _parse_time_boundary(lower, upper=False)
+            if isinstance(upper, str):
+                window["to"] = _parse_time_boundary(upper, upper=True)
+            if isinstance(lower, str) and isinstance(upper, str) and window["from"] > window["to"]:
+                raise ValueError("time_window.from must be before or equal to time_window.to")
+            return {
+                name: _format_utc(item) if isinstance(item, datetime) else item
+                for name, item in window.items()
+            }
+        return {name: walk(item, name) for name, item in value.items()}
+
+    return walk(arguments)
+
+
+def _parse_time_boundary(value: str, *, upper: bool) -> datetime:
+    """Parse a timezone-aware search boundary or an inclusive UTC calendar day."""
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        day = datetime.fromisoformat(value).replace(tzinfo=UTC)
+        return day.replace(hour=23, minute=59, second=59, microsecond=999999) if upper else day
+    if not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})",
+        value,
+    ):
+        raise ValueError(
+            f"time_window boundary {value!r} must include a timezone or be a calendar day"
+        )
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def _format_utc(value: datetime) -> str:
+    """Format a UTC datetime the way the practice runtime accepted it."""
+    return value.isoformat().replace("+00:00", "Z")

@@ -290,7 +290,20 @@ class GraphLedger:
     def _cache_key(tool_name: str, arguments: dict[str, Any]) -> str:
         """Build the identity of a call without arguments that do not change it."""
         relevant = {key: value for key, value in arguments.items() if key not in IGNORED_ARGUMENTS}
-        return json.dumps([tool_name, relevant], sort_keys=True, ensure_ascii=False, default=str)
+        return json.dumps(
+            [tool_name, _strip_strings(relevant)], sort_keys=True, ensure_ascii=False, default=str
+        )
+
+
+def _strip_strings(value: Any) -> Any:
+    """Drop surrounding whitespace from every string, which never changes a lookup."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        return {key: _strip_strings(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_strip_strings(item) for item in value]
+    return value
 
 
 def _object_kind(node: dict[str, Any]) -> str | None:

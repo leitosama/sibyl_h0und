@@ -93,6 +93,35 @@ def test_step_schema_offers_exactly_the_catalog_tools(lookup: dict[str, Any]) ->
     assert lookup_branch["properties"]["page"] == {"anyOf": [{"type": "integer"}, {"type": "null"}]}
 
 
+def test_nested_objects_are_closed_and_their_optional_fields_nullable() -> None:
+    """Strict mode needs every object closed, including ones written without `type: object`."""
+    scope = {
+        "properties": {"kind": {"type": "string"}, "attribute": {"type": "string"}},
+        "required": ["kind"],
+    }
+    window = {"type": ["object", "null"], "properties": {"from": {"type": "string"}}}
+    parameters = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}, "scope": scope, "window": window},
+        "required": ["query", "scope", "window"],
+    }
+    catalog = catalog_of(
+        {"name": "search", "parameters": parameters}, {"name": "finish_investigation"}
+    )
+
+    response_format = catalog.response_format()
+
+    assert response_format["json_schema"]["strict"] is True
+    properties = branches(response_format)["search"]["properties"]
+    for nested in (properties["scope"], properties["window"]):
+        assert nested["additionalProperties"] is False
+        assert nested["required"] == list(nested["properties"])
+    assert properties["scope"]["properties"]["attribute"] == {
+        "anyOf": [{"type": "string"}, {"type": "null"}]
+    }
+    assert properties["scope"]["properties"]["kind"] == {"type": "string"}
+
+
 def test_step_schema_keeps_tool_definitions_resolvable() -> None:
     """Definitions of each tool move to the root, and every reference still resolves."""
     catalog = catalog_of({"name": "finish_investigation", "parameters": FINISH_PARAMETERS})
@@ -116,6 +145,7 @@ def test_tools_without_an_argument_schema() -> None:
     """A practice tool falls back to its known schema; an unknown one gets free arguments."""
     catalog = catalog_of(
         {"name": "get_entity", "parameters": {"type": "object"}},
+        {"name": "list_hosts", "parameters": {"type": "object"}},
         {"name": "list_alerts"},
         {"name": "finish_investigation"},
     )
@@ -125,10 +155,12 @@ def test_tools_without_an_argument_schema() -> None:
     tools = branches(response_format)
     assert set(tools["get_entity"]["properties"]) == {"tool", "entity_id", "reasoning"}
     assert "submission" in tools["finish_investigation"]["properties"]
+    # An object schema naming no properties is a tool without arguments.
+    assert tools["list_hosts"]["properties"] == {"tool": {"type": "string", "enum": ["list_hosts"]}}
     assert tools["list_alerts"]["additionalProperties"] is True
     # Strict mode cannot express free arguments, so the step schema is not strict.
     assert response_format["json_schema"]["strict"] is False
-    strict_format = catalog.response_format(["get_entity", "finish_investigation"])
+    strict_format = catalog.response_format(["get_entity", "list_hosts", "finish_investigation"])
     assert strict_format["json_schema"]["strict"] is True
 
 
@@ -148,3 +180,63 @@ def test_catalog_without_finish_investigation_is_rejected() -> None:
     """A task that cannot be finished is an error, not an endless investigation."""
     with pytest.raises(ValueError, match="finish_investigation"):
         catalog_of({"name": "lookup_host", "parameters": LOOKUP_PARAMETERS})
+
+
+SEARCH_PARAMETERS = {
+    "type": "object",
+    "properties": {
+        "query": {"type": "string", "minLength": 5},
+        "page_id": {"type": "integer", "minimum": 1, "default": 1},
+        "time_window": {
+            "type": "object",
+            "properties": {"from": {"type": "string"}, "to": {"type": "string"}},
+        },
+    },
+    "required": ["query"],
+}
+
+
+def test_prepare_normalizes_arguments_so_equal_calls_look_equal() -> None:
+    """Defaults fill omitted arguments and calendar days become whole UTC days."""
+    catalog = catalog_of(
+        {"name": "search", "parameters": SEARCH_PARAMETERS}, {"name": "finish_investigation"}
+    )
+
+    prepared = catalog.prepare(
+        "search", {"query": "powershell", "time_window": {"from": "2026-09-01", "to": "2026-09-02"}}
+    )
+
+    assert prepared == {
+        "query": "powershell",
+        "page_id": 1,
+        "time_window": {"from": "2026-09-01T00:00:00Z", "to": "2026-09-02T23:59:59.999999Z"},
+    }
+    assert catalog.prepare("search", {"query": "powershell", "page_id": 1}) == catalog.prepare(
+        "search", {"query": "powershell"}
+    )
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param({"query": "cmd"}, id="too-short"),
+        pytest.param({"page_id": 2}, id="missing-required"),
+        pytest.param({"query": "powershell", "page_id": 0}, id="below-minimum"),
+        pytest.param(
+            {"query": "powershell", "time_window": {"from": "2026-09-02", "to": "2026-09-01"}},
+            id="inverted-window",
+        ),
+        pytest.param(
+            {"query": "powershell", "time_window": {"from": "2026-09-01T10:00:00"}},
+            id="naive-timestamp",
+        ),
+    ],
+)
+def test_prepare_rejects_arguments_that_break_the_tool_schema(arguments: dict[str, Any]) -> None:
+    """A call the runtime would reject is caught before it costs a runtime call."""
+    catalog = catalog_of(
+        {"name": "search", "parameters": SEARCH_PARAMETERS}, {"name": "finish_investigation"}
+    )
+
+    with pytest.raises(ValueError):
+        catalog.prepare("search", arguments)

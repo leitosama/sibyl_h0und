@@ -242,6 +242,13 @@ class SimpleSGRAgent:
                 }
             )
 
+            problem = None
+            if tool_name in catalog:
+                try:
+                    arguments = catalog.prepare(tool_name, arguments)
+                except ValueError as exc:
+                    problem = str(exc)
+
             if tool_name not in catalog or (finish_only and tool_name != FINISH_TOOL):
                 allowed = [FINISH_TOOL] if finish_only else catalog.names
                 feedback: dict[str, Any] = {
@@ -253,6 +260,15 @@ class SimpleSGRAgent:
                 budget.record_local_answer()
                 logger.warning("Rejected unavailable tool {} locally.", tool_name)
                 trace.event("tool_rejected", tool=tool_name, payload={"arguments": arguments})
+            elif problem is not None:
+                feedback = {"status": "error", "message": f"Not sent to the runtime: {problem}"}
+                budget.record_local_answer()
+                logger.warning("Rejected invalid {} arguments locally: {}", tool_name, problem)
+                trace.event(
+                    "tool_invalid",
+                    tool=tool_name,
+                    payload={"arguments": arguments, "feedback": feedback},
+                )
             elif (decision := ledger.check(tool_name, arguments)).feedback is not None:
                 feedback = decision.feedback
                 budget.record_local_answer()

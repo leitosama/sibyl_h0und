@@ -274,10 +274,11 @@ def benign_finish_step(entity_id: str, field: str) -> NextStep:
 
 
 def test_ledger_answers_invented_ids_and_repeats_without_the_runtime(tmp_path: Path) -> None:
-    """Invented ids, repeated calls and an invalid finish must not cost runtime calls."""
+    """Invented ids, invalid arguments, repeats and an invalid finish cost no runtime calls."""
     llm = FakeStepClient(
         [
             get_entity_step("entity-invented"),
+            make_step("get_entity", reasoning="No id given."),
             get_entity_step("entity-1"),
             get_entity_step("entity-1", reasoning="Look again."),
             benign_finish_step("entity-invented", "pid"),
@@ -298,15 +299,17 @@ def test_ledger_answers_invented_ids_and_repeats_without_the_runtime(tmp_path: P
     feedback = [json.loads(request[-1]["content"]) for request in llm.requests[1:]]
     assert feedback[0]["status"] == "error"
     assert "entity-invented" in feedback[0]["message"]
-    assert feedback[2]["result"] == {"id": "entity-1", "pid": 42}
-    assert "note" in feedback[2]
-    assert "entity-invented" in feedback[3]["message"]
-    assert "digitial_signature" in feedback[4]["message"]
+    assert "entity_id" in feedback[1]["message"]
+    assert feedback[3]["result"] == {"id": "entity-1", "pid": 42}
+    assert "note" in feedback[3]
+    assert "entity-invented" in feedback[4]["message"]
+    assert "digitial_signature" in feedback[5]["message"]
 
     (run_dir,) = tmp_path.iterdir()
     events = read_events(run_dir / "001_task-1.trace.jsonl")
     assert [event["kind"] for event in events if event["kind"].startswith("tool_")] == [
         "tool_rejected",
+        "tool_invalid",
         "tool_call",
         "tool_cached",
         "tool_rejected",

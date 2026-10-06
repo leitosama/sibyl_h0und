@@ -12,9 +12,10 @@ from dataclasses import dataclass
 RUNTIME_CALL_LIMIT = 100
 # Default ceiling, counting the `finish_investigation` call.
 DEFAULT_MAX_RUNTIME_CALLS = 95
-# Locally answered turns in a row after which the model must finish: it is
-# stuck on calls that bring no new evidence.
-MAX_LOCAL_STREAK = 10
+# Locally answered turns in a row after which the model must finish. This is
+# a stall guard, not an economy limit: it spends no runtime calls and fires
+# only when the model loops on calls that bring no new evidence (ADR 0009).
+MAX_LOCAL_STREAK = 20
 # Turns the model gets to produce an accepted report once it must finish.
 MAX_FINISH_TURNS = 5
 
@@ -63,7 +64,7 @@ class CallBudget:
 
         Raises:
             CallBudgetExhaustedError: If the model had its finish turns, or
-                another call would reach the runtime's own limit.
+                the runtime's own limit is used up.
         """
         if self.finish_reason is None:
             if self.runtime_calls >= self.max_runtime_calls - 1:
@@ -78,7 +79,8 @@ class CallBudget:
         if self.finish_reason is None:
             return False
         self.finish_turns += 1
-        if self.finish_turns > MAX_FINISH_TURNS or self.runtime_calls >= RUNTIME_CALL_LIMIT - 1:
+        # The runtime accepts its 100th call, so a report may still be sent as that call.
+        if self.finish_turns > MAX_FINISH_TURNS or self.runtime_calls >= RUNTIME_CALL_LIMIT:
             raise CallBudgetExhaustedError(
                 f"No accepted finish_investigation after {self.runtime_calls} runtime calls "
                 f"and {self.finish_turns - 1} finish-only turns ({self.finish_reason})."
