@@ -57,6 +57,45 @@ def test_ids_from_relations_and_alert_are_known() -> None:
     ]
 
 
+def test_relations_returned_in_full_by_a_search_count_as_visited() -> None:
+    """A relation a search returned whole needs no fetch; one without properties does."""
+    ledger = fetched_ledger()
+    found = {
+        "results": [
+            {
+                "kind": "relation",
+                "id": "rel-2",
+                "type": "win_process_create",
+                "source_id": "proc-1",
+                "target_id": "proc-8",
+                "properties": {"cmdline": "x.exe"},
+            },
+            {
+                "kind": "relation",
+                "id": "rel-3",
+                "type": "wrote_file",
+                "source_id": "proc-1",
+                "target_id": "file-4",
+            },
+            {"kind": "entity", "id": "proc-8", "type": "windows_process"},
+        ]
+    }
+    ledger.record(
+        "search",
+        {"query": "proc-1", "reasoning": "x"},
+        ToolOutcome("ok", found, None),
+    )
+
+    assert ledger.unvisited_relations() == ["rel-1", "rel-3"]
+    assert ledger.unvisited_entities() == ["file-4", "proc-8"]
+    cited = {"anchor": "relation", "relation_id": "rel-2", "property_fields": ["cmdline"]}
+    assert ledger.check("finish_investigation", {"legitimacy_evidence": [cited]}).feedback is None
+    typo = {**cited, "property_fields": ["typo"]}
+    decision = ledger.check("finish_investigation", {"legitimacy_evidence": [typo]})
+    assert decision.feedback is not None
+    assert "'typo'" in decision.feedback["message"]
+
+
 def test_failed_response_does_not_make_the_requested_id_known() -> None:
     """An error that echoes an invented id must not legitimize it."""
     ledger = GraphLedger()

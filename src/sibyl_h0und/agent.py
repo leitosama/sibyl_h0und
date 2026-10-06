@@ -59,8 +59,13 @@ hypotheses and the evidence for and against each.
    and deletes, registry, service and task changes, network connections in either
    direction. Follow what led to it: the parent process, the user and logon, the job,
    service, email or download that started it. `still_open` in tool feedback lists what
-   you have not opened yet. For an entity with very many relations, try a search that
-   narrows to it instead of opening the relations one at a time.
+   you have not opened yet. To see an entity's relations, prefer one search over opening
+   them one at a time: if the catalog has a search, use the entity's full id as the
+   query. It returns the relations that name the entity, in full and with their types,
+   a page at a time; keep those whose source or target is that entity. For an entity
+   with very many relations, also limit the search to one relation type, starting with
+   the types that show what it did: process creation, file writes, executions, registry
+   and service changes.
 3. Place it on the kill chain, with MITRE ATT&CK as the map. For each notable action,
    name the tactic and technique it would be if hostile. An alert is usually one stage
    of a longer chain: ask what must have come before it (initial access, execution,
@@ -124,8 +129,8 @@ Report:
 
 Mechanics:
 - Execute exactly one tool per step and use its evidence before choosing the next.
-- Prefer following relations over searching; search when you have a concrete string
-  and no edge leading to it.
+- Search with a concrete string: an entity's id to list its relations (step 2), or a
+  name, address or value that no edge you have leads to.
 - Calls with an id the runtime never returned and repeated calls are answered locally
   and do not reach the runtime.
 - When told that only `{FINISH_TOOL}` remains, submit the verdict at once from the
