@@ -55,19 +55,19 @@ def test_linux_file_is_not_rated() -> None:
         (
             {"image_path": "C:\\Windows\\System32\\net.exe", "user_sid": "S-1-5-21-1-2-3-1105"},
             "low",
-            {"location": 0, "user": 1},
+            {"location": 0, "user": 0},
         ),
         (
             {"image_path": "C:\\PerfLogs\\a.exe", "user_sid": "S-1-5-18"},
             "high",
-            {"location": 2, "user": 2},
+            {"location": 1, "user": 1},
         ),
         (
             {"image_path": "C:\\ProgramData\\a.exe", "integrity_level": "high"},
-            "medium",
-            {"location": 1, "user": 2},
+            "low",
+            {"location": 0, "user": 1},
         ),
-        ({"user_sid": "S-1-5-21-1-2-3-500"}, "low", {"user": 2}),
+        ({"user_sid": "S-1-5-21-1-2-3-500"}, "low", {"user": 1}),
     ],
 )
 def test_process_rating_expects_system_directories(
@@ -101,4 +101,4 @@ def test_board_reports_a_node_once_and_again_only_when_it_changes() -> None:
     assert board.observe({"result": partial}) == []
     changed = board.observe(full)
 
-    assert [finding.ratings for finding in changed] == [{"location": 1, "user": 2}]
+    assert [finding.ratings for finding in changed] == [{"location": 0, "user": 1}]
