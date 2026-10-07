@@ -87,6 +87,7 @@ traces/
 | `step` | `tool` | `step`: разобранный `NextStep` |
 | `tool_call` | `tool`, `status`, `reward`, `terminated`, `truncated` или `error` | `arguments`, `response`: полный `ToolCallResult` от runtime |
 | `tool_rejected` | `tool` | `arguments` вызова, отклонённого локально (инструмента нет в каталоге или GraphLedger не знает id), `feedback`: ответ модели |
+| `report_refused` | `tool` | `arguments` отчёта-заглушки, отклонённого локально один раз за задачу (ADR 0018), и `feedback`: ответ модели |
 | `tool_cached` | `tool` | `arguments` повторного вызова и `feedback`: прежний ответ из кэша GraphLedger |
 | `task_end` | `completion_reason`, `total_reward`, `quality_score`, `efficiency_score`, `tool_calls`, `steps_taken`, `agent_steps`, `runtime_calls`, `llm_calls`, `llm_tokens`, `llm_ms`, `error` | `task_result` |
 

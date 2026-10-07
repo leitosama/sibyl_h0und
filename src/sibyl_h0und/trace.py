@@ -144,8 +144,8 @@ class TaskTrace:
         """Write a call answered without the runtime.
 
         Args:
-            kind: `tool_rejected`, `tool_invalid`, `tool_cached` or `tool_knowledge`
-                (the lookup and its answer).
+            kind: `tool_rejected`, `tool_invalid`, `report_refused`, `tool_cached`
+                or `tool_knowledge` (the lookup and its answer).
             tool: Tool the model asked for.
             arguments: Arguments of the call.
             feedback: Answer shown to the model, if it is worth keeping.

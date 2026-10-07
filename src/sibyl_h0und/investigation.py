@@ -20,6 +20,11 @@ from sibyl_h0und.vocabulary import KNOWLEDGE_TOOL, KNOWLEDGE_TOOL_SPEC, shared
 
 # Observation fields that repeat in every response and are not part of the alert.
 NON_ALERT_FIELDS = frozenset({"available_tools", "last_tool_result"})
+# Shorter reasoning is a placeholder, not a report: practice runs ended long
+# investigations with "" and "Short test" (ADR 0018).
+MIN_REPORT_REASONING = 20
+# The list a report of each verdict must not leave empty.
+REPORT_CITATIONS = {"malicious": "ir_artifacts", "benign": "legitimacy_evidence"}
 
 
 @dataclass(frozen=True)
@@ -78,6 +83,7 @@ class Investigation:
         self._ledger = GraphLedger()
         self._ledger.observe_alert(self.alert)
         self._vocabulary = shared()
+        self._report_refused = False
         # A search scoped to a relation type lists an entity's relations by its id.
         self._relation_search = self.catalog.relation_search()
 
@@ -133,6 +139,17 @@ class Investigation:
             logger.warning("Rejected invalid {} arguments locally: {}", tool, problem)
             self.trace.local_answer("tool_invalid", tool, arguments, feedback)
             return LocalAnswer(feedback)
+        empty = report_problem(arguments) if tool == FINISH_TOOL else None
+        if empty is not None and not self._report_refused:
+            # Refused once: a second weak report still beats no report at all.
+            self._report_refused = True
+            feedback = {
+                "status": "error",
+                "message": f"Not sent to the runtime: {empty} Submit the report again.",
+            }
+            logger.warning("Refused an empty report once: {}", empty)
+            self.trace.local_answer("report_refused", tool, arguments, feedback)
+            return LocalAnswer(feedback)
         if tool == KNOWLEDGE_TOOL and self.catalog.is_local(tool):
             feedback = self._vocabulary.lookup(arguments["query"])
             self.trace.local_answer("tool_knowledge", tool, arguments, feedback)
@@ -173,3 +190,32 @@ class Investigation:
                 )
             feedback["still_open"] = open_items
         return Reply(feedback)
+
+
+def report_problem(arguments: dict[str, Any]) -> str | None:
+    """Find a report that says nothing.
+
+    The report is the arguments or an object directly inside them that holds a
+    `verdict`. Only fields next to that verdict are read, so a report tool of
+    another shape passes untouched.
+
+    Args:
+        arguments: Prepared arguments of the report tool.
+
+    Returns:
+        What is missing, or `None` for a report that can be sent.
+    """
+    candidates = [arguments, *(value for value in arguments.values() if isinstance(value, dict))]
+    report = next((item for item in candidates if "verdict" in item), None)
+    if report is None:
+        return None
+    reasoning = report.get("reasoning")
+    if isinstance(reasoning, str) and len(reasoning.strip()) < MIN_REPORT_REASONING:
+        return (
+            "the reasoning is empty or too short: tell the chain you established, "
+            "with its stages, techniques and entities, in a few sentences."
+        )
+    citations = REPORT_CITATIONS.get(str(report.get("verdict")))
+    if citations is not None and report.get(citations) == []:
+        return f"a {report['verdict']} report must cite entities in `{citations}`."
+    return None
