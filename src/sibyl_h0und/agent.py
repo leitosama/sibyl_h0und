@@ -110,6 +110,7 @@ Knowledge vocabulary (`{KNOWLEDGE_TOOL}`):
 - Use it to test a hypothesis, not as an alarm. Query the technique id you suspect, a
   file name or original file name, a SHA-256, a registry key path, a domain or a tool
   name. Technique ids and ATT&CK terms find better entries than business wording.
+  Put several terms of one hypothesis in `terms` of a single lookup.
 - Weigh both readings; neither a match nor an empty answer decides the verdict.
   Entries are given as the sources state them, with no verdict. An empty answer means
   the sources have no entry, not that the term is safe. Do not repeat a lookup.

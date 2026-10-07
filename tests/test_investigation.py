@@ -202,6 +202,16 @@ def test_the_knowledge_tool_is_offered_and_answered_locally_whatever_the_ledger_
     assert again == first
 
 
+def test_a_knowledge_lookup_answers_every_term_the_model_lists() -> None:
+    """The catalog accepts `terms` and the vocabulary answers each of them."""
+    answer = Investigation(observation()).before_call(
+        "lookup_knowledge", {"query": "vssadmin.exe", "terms": ["T1490"]}
+    )
+
+    assert isinstance(answer, LocalAnswer)
+    assert {match["term"] for match in answer.feedback["matches"]} == {"vssadmin.exe", "T1490"}
+
+
 def test_a_knowledge_lookup_without_a_query_is_refused_locally_not_crashed() -> None:
     """The model's malformed lookup gets an error message instead of breaking the task."""
     answer = Investigation(observation()).before_call("lookup_knowledge", {})

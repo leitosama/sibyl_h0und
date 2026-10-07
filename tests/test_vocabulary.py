@@ -92,6 +92,119 @@ def test_one_word_for_a_concept_finds_the_technique_named_by_it() -> None:
     assert [match["id"] for match in matches] == ["T1036"]
 
 
+def found_by_terms(answer: dict[str, Any]) -> set[tuple[str, str, str]]:
+    """Return the term, source and id or name of each entry a term inside the query found."""
+    return {
+        (match["term"], match["source"], match.get("id") or match["name"])
+        for match in answer["matches"]
+        if match.get("term", answer["query"]) != answer["query"]
+    }
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("sdelete.exe anti-forensics", {("sdelete.exe", "attack", "S0195")}),
+        ("rundll32 comsvcs dump", {("rundll32", "lolbas", "rundll32.exe")}),
+        ("sekurlsa::logonpasswords mimikatz", {("mimikatz", "attack", "S0002")}),
+        (
+            "vssadmin delete shadows T1490",
+            {("vssadmin", "lolbas", "vssadmin.exe"), ("T1490", "attack", "T1490")},
+        ),
+        ("shadows deleted (vssadmin.exe).", {("vssadmin.exe", "lolbas", "vssadmin.exe")}),
+    ],
+)
+def test_terms_inside_a_description_are_looked_up_as_terms(
+    query: str, expected: set[tuple[str, str, str]]
+) -> None:
+    """Context words around a known term no longer hide it (issue #40)."""
+    assert found_by_terms(shared().lookup(query)) == expected
+
+
+@pytest.mark.parametrize("query", ["wsmprovhost.exe", "w3wp.exe", "sdclt.exe"])
+def test_an_unknown_program_stays_an_honest_miss(query: str) -> None:
+    """A program no source lists gets no entry, alone or among other terms."""
+    assert shared().lookup(query)["matches"] == []
+    assert shared().lookup("vssadmin", [query])["not_found"] == [query]
+
+
+@pytest.mark.parametrize("query", ["remote access tool control", "update the query", "play royal"])
+def test_ordinary_words_in_a_description_are_not_program_names(query: str) -> None:
+    """`remote` is not `remote.exe` and `play` is not the Play ransomware."""
+    assert found_by_terms(shared().lookup(query)) == set()
+
+
+@pytest.mark.parametrize(
+    ("query", "row"),
+    [("logon by S-1-5-18", "account"), ("dropped a .ps1 script", "extension")],
+)
+def test_a_sid_or_an_extension_in_a_description_gets_its_cheat_sheet_row(
+    query: str, row: str
+) -> None:
+    """Every kind of term a single query can be is also found inside a description."""
+    (match,) = [m for m in shared().lookup(query)["matches"] if m["source"] == "nextron"]
+
+    assert row in match
+
+
+@pytest.mark.parametrize(
+    "query", ['"C:\\Program Files\\AnyDesk\\AnyDesk.exe"', "/opt/my tools/bin/anydesk"]
+)
+def test_a_path_with_spaces_is_one_term_not_a_description(query: str) -> None:
+    """A quoted Windows path or a Unix path is not split into words."""
+    assert "lolrmm" in sources(shared().lookup(query))
+
+
+def test_one_meaningful_word_in_a_sentence_does_not_match_on_summaries() -> None:
+    """Stop words around `powershell` do not lower the bar for a word match."""
+
+    def ids(query: str) -> list[str]:
+        return [match.get("id") for match in shared().lookup(query)["matches"]]
+
+    assert ids("use of powershell") == ids("powershell")
+
+
+def test_a_lookup_stops_after_ten_searches_with_entries_and_names_the_rest() -> None:
+    """Many terms cannot flood the answer; the ones past the limit are named."""
+    terms = sorted(load_pack("attack_techniques").entries)[:15]
+
+    answer = shared().lookup(terms[0], terms[1:])
+
+    assert answer["skipped"] == terms[10:]
+    assert {match["term"] for match in answer["matches"]} == set(terms[:10])
+
+
+def test_ordinary_words_of_a_long_description_do_not_use_up_its_word_search() -> None:
+    """Program lookups that find nothing do not count toward the limit."""
+    query = (
+        "attacker deleted volume shadow copies and backups on the file server "
+        "to stop system recovery before encrypting shared documents"
+    )
+
+    answer = shared().lookup(query)
+
+    assert "skipped" not in answer
+    assert "T1490" in {match.get("id") for match in answer["matches"]}
+
+
+def test_several_terms_in_one_lookup_say_which_term_found_each_entry() -> None:
+    """One local call answers each term once and names the ones with no entry."""
+    answer = shared().lookup("vssadmin", ["T1490", "w3wp.exe", "vssadmin.exe", "T1490"])
+
+    assert [(match["term"], match["source"]) for match in answer["matches"]] == [
+        ("vssadmin", "lolbas"),
+        ("T1490", "attack"),
+    ]
+    assert answer["not_found"] == ["w3wp.exe"]
+
+
+def test_a_hyphenated_name_finds_the_technique_spelled_with_spaces() -> None:
+    """`pass-the-hash` meets "Pass the Hash"."""
+    matches = shared().lookup("pass-the-hash")["matches"]
+
+    assert "T1550.002" in {match["id"] for match in matches}
+
+
 def test_nothing_found_says_so_without_calling_the_term_safe() -> None:
     """Silence of the sources is not evidence of anything."""
     answer = shared().lookup("zzzqq-no-such-thing")

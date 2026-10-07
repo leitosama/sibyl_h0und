@@ -23,8 +23,16 @@ A query is one string. It is matched the same way whatever it is:
 - a registry key path (`HKLM\\...`, `HKCU\\...`) finds the autostart locations of
   ForensicArtifacts that are the key or one of its parents;
 - any words find the techniques, software and WTFBins entries that share them.
+
+A query with spaces is a description. Besides its words, each term in it is
+looked up on its own: an id, a file name, a path, a domain, a hash, a SID or an
+extension as above, and a bare word as a Windows program name (`vssadmin`,
+`mimikatz`) unless it is an ordinary word. More terms can come in `terms` in the
+same lookup. When a lookup makes more than one search, each entry says which
+`term` found it; at most `TERM_LIMIT` searches of one lookup give entries.
 """
 
+import json
 import re
 from collections import defaultdict
 from collections.abc import Iterable
@@ -53,8 +61,9 @@ KNOWLEDGE_TOOL_SPEC: dict[str, Any] = {
         "registry locations, LOLDrivers abusable drivers, HijackLibs DLL hijacking "
         "opportunities, and the Nextron antivirus cheat sheet. "
         "The query is an ATT&CK id (T1036.003, S0195), a file name or path, a SHA-256, "
-        "a registry key path, a domain, or words describing behavior. Entries are returned as "
-        "the sources state them, with no verdict."
+        "a registry key path, a domain, or words describing behavior. Several terms can be "
+        "looked up at once in `terms`. Entries are returned as the sources state them, "
+        "with no verdict."
     ),
     "parameters": {
         "type": "object",
@@ -64,7 +73,15 @@ KNOWLEDGE_TOOL_SPEC: dict[str, Any] = {
                 "description": (
                     "Term to look up, such as sdelete.exe, T1036.003 or rename system utility."
                 ),
-            }
+            },
+            "terms": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "More terms to look up in the same call, one term each, such as "
+                    "vssadmin.exe and T1490."
+                ),
+            },
         },
         "required": ["query"],
     },
@@ -73,6 +90,9 @@ KNOWLEDGE_TOOL_SPEC: dict[str, Any] = {
 # Most software entries that use a technique, and entries per kind of a word match.
 LIMIT = 5
 WORD_LIMIT = 3
+# Most searches of one lookup that give entries: a term, a term inside a description
+# or the words of a description. A search with no entry adds nothing to the answer.
+TERM_LIMIT = 10
 # Words too common to say what a query is about.
 STOP_WORDS = frozenset(
     {
@@ -81,12 +101,38 @@ STOP_WORDS = frozenset(
         "with", "use", "used", "using", "adversaries", "adversary", "may",
     }
 )  # fmt: skip
+# Ordinary words that are also the name of a program in LOLBAS, LOLRMM, WTFBins or
+# ATT&CK software. In a description they keep their ordinary sense: "remote access"
+# is not `remote.exe` and "play" is not the Play ransomware. Names that a security
+# text uses for the tool itself (`empire`, `responder`, `havoc`, `cipher`) are not here.
+COMMON_WORDS = frozenset(
+    {
+        "agenda", "anchor", "apostle", "aurora", "avenger", "backspace", "biscuit", "bookworm",
+        "boombox", "brushfire", "calendar", "cannon", "canopy", "carbon", "change", "chaos",
+        "control", "crimson", "deadeye", "deadwood", "denis", "disco", "driftwood", "duet",
+        "dustpan", "elmer", "embargo", "emissary", "epic", "expand", "explosive", "ferocious",
+        "flame", "flamer", "gazer", "griffon", "james", "kevin", "lookback", "lowball",
+        "lucifer", "machete", "mango", "medusa", "meteor", "milan", "mosquito", "ninja",
+        "octopus", "oopsie", "pacemaker", "page", "pandora", "photo", "pitstop", "play", "pony",
+        "prestige", "print", "proton", "query", "raindrop", "reaver", "recycler", "remote",
+        "replace", "reset", "riptide", "route", "rover", "royal", "samurai", "scorpion",
+        "shark", "snake", "soldier", "solar", "spaceman", "spaceship", "spark", "squirrel",
+        "supernova", "tracker", "trinity", "update", "upload", "viper", "wiper", "write",
+    }
+)  # fmt: skip
+# Words of a description that are never looked up as a program name.
+_NOT_PROGRAMS = STOP_WORDS | COMMON_WORDS
 _TOKEN = re.compile(r"[a-z0-9][a-z0-9.+#-]{1,}")
 _ABSOLUTE_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
 _SID = re.compile(r"^S-1-\d+(?:-\d+)+$", re.IGNORECASE)
 _EXTENSION = re.compile(r"^\.[A-Za-z0-9]{1,8}$")
 _WINDOWS_FILE = re.compile(r"\.(?:exe|dll|sys|bat|cmd|ps1|vbs|msi|com|scr)$", re.IGNORECASE)
 _PLAIN_WORD = re.compile(r"^[A-Za-z][A-Za-z-]*$")
+_BARE_WORD = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+_DIGEST = re.compile(r"^(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64})$", re.IGNORECASE)
+_UNIX_PATH = re.compile(r"^/[^/]+/")
+# Punctuation around a term in a description: `(vssadmin.exe),` is `vssadmin.exe`.
+_EDGE = "\"'`()[]{}<>,;:!?"
 # Words of a query a text must share for a word match.
 MIN_WORD_MATCHES = 2
 # A word in a name says more about what an entry is than one in its summary.
@@ -121,10 +167,52 @@ def stem(word: str) -> str:
 
 
 def tokens(text: Any) -> set[str]:
-    """Return the lower-cased, stemmed words of a text that can say what it is about."""
+    """Return the lower-cased, stemmed words of a text that can say what it is about.
+
+    A hyphenated word also gives its parts, so `pass-the-hash` meets "Pass the Hash".
+    """
     if not isinstance(text, str):
         return set()
-    return {stem(word) for word in _TOKEN.findall(text.lower()) if word not in STOP_WORDS}
+    words = set()
+    for word in _TOKEN.findall(text.lower()):
+        parts = [word, *word.split("-")] if "-" in word else [word]
+        words |= {stem(part) for part in parts if len(part) > 1 and part not in STOP_WORDS}
+    return words
+
+
+def _terms_in(text: str) -> list[tuple[str, bool]]:
+    """Return the terms of a description, each with whether it is a bare word.
+
+    A term is an ATT&CK id, a digest, a registry key, an absolute path, or a name
+    with a dot (a file name or a domain). A bare word counts too, unless it is a
+    stop word or an ordinary word that a program happens to be named after.
+    """
+    found: dict[str, bool] = {}
+    for raw in text.split():
+        token = raw
+        while (trimmed := token.strip(_EDGE).rstrip(".")) != token:
+            token = trimmed
+        if not token or token in found:
+            continue
+        if (
+            attack_id(token)
+            or _DIGEST.match(token)
+            or _SID.match(token)
+            or _EXTENSION.match(token)
+            or registry_path(token)
+            or _ABSOLUTE_PATH.match(token)
+            or _UNIX_PATH.match(token)
+            or "." in token
+        ):
+            found[token] = False
+        elif _BARE_WORD.match(token) and token.lower() not in _NOT_PROGRAMS:
+            found[token] = True
+    return list(found.items())
+
+
+def _same_entry(item: dict[str, Any]) -> str:
+    """Return what identifies an entry whichever term found it."""
+    return json.dumps({k: v for k, v in item.items() if k != "term"}, sort_keys=True, default=str)
 
 
 class Vocabulary:
@@ -164,30 +252,57 @@ class Vocabulary:
             },
         }
 
-    def lookup(self, query: Any) -> dict[str, Any]:
-        """Return what the sources say about a query.
+    def lookup(self, query: Any, terms: Any = ()) -> dict[str, Any]:
+        """Return what the sources say about a query and any more terms.
 
         Args:
             query: The model's term, as given.
+            terms: More terms of the same lookup, as given.
 
         Returns:
             `query`, `matches` (entries, each with its `source`) and, when
-            there are none, a `note` that the sources have no entry.
+            there are none, a `note` that the sources have no entry. When the
+            lookup made more than one search, each entry has the `term` that
+            found it, `not_found` lists the asked terms with no entry, and
+            `skipped` the searches not made once `TERM_LIMIT` searches gave entries.
         """
         text = query.strip() if isinstance(query, str) else ""
+        extra = terms if isinstance(terms, list) else []
+        stripped = (item.strip() for item in (text, *extra) if isinstance(item, str))
+        asked = list(dict.fromkeys(item for item in stripped if item))
+        searches = [(item, *search) for item in asked for search in self._searches(item)]
+        tagged = len(searches) > 1
         matches: list[dict[str, Any]] = []
-        if text:
-            matches += self._by_id(text)
-            if registry_path(text):
-                matches += self._by_registry(text)
+        seen: set[str] = set()
+        answered: set[str] = set()
+        skipped: list[str] = []
+        with_entries = 0
+        for item, term, how in searches:
+            if with_entries >= TERM_LIMIT:
+                skipped.append(term)
+                continue
+            if how == "program":
+                # A bare word is a Windows program name, not a Unix one or a DLL.
+                found = self._by_program(f"{term}.exe")
+            elif how == "words":
+                found = self._by_words(term, matches)
             else:
-                matches += self._by_program(text)
-                matches += self._by_driver(text)
-            matches += self._by_domain(text)
-            matches += self._by_cheat_sheet(text)
-            if self._is_description(text) or (not matches and _PLAIN_WORD.match(text)):
-                matches += self._by_words(text, matches)
+                found = self._by_term(term)
+                if not found and _PLAIN_WORD.match(term):
+                    found = self._by_words(term, matches)
+            with_entries += bool(found)
+            for entry in found:
+                answered.add(item)
+                entry = {"term": term, **entry} if tagged else entry
+                if (key := _same_entry(entry)) not in seen:
+                    seen.add(key)
+                    matches.append(entry)
         answer: dict[str, Any] = {"query": text, "matches": matches}
+        not_found = [item for item in asked if item not in answered]
+        if matches and not_found and len(asked) > 1:
+            answer["not_found"] = not_found
+        if skipped:
+            answer["skipped"] = skipped
         if not matches:
             answer["note"] = (
                 "No entry in ATT&CK, LOLBAS, GTFOBins, GTFOArgs, LOLRMM, WTFBins, "
@@ -195,6 +310,25 @@ class Vocabulary:
                 "That says nothing about whether the term is benign or hostile."
             )
         return answer
+
+    def _searches(self, text: str) -> list[tuple[str, str]]:
+        """Return the searches for one asked term: the term, or a description's terms and words."""
+        if not self._is_description(text):
+            return [(text, "term")]
+        terms = [(term, "program" if bare else "term") for term, bare in _terms_in(text)]
+        return [*terms, (text, "words")]
+
+    def _by_term(self, text: str) -> list[dict[str, Any]]:
+        """Find the entries of one term: an id, a path, a file name, a domain or a key."""
+        found = self._by_id(text)
+        if registry_path(text):
+            found += self._by_registry(text)
+        else:
+            found += self._by_program(text)
+            found += self._by_driver(text)
+        found += self._by_domain(text)
+        found += self._by_cheat_sheet(text)
+        return found
 
     def _named_techniques(self, ids: Iterable[str]) -> list[dict[str, Any]]:
         """Give each technique id with its ATT&CK name, `None` when the pack lacks it."""
@@ -387,23 +521,30 @@ class Vocabulary:
     @staticmethod
     def _is_description(text: str) -> bool:
         """Tell whether a query is words, not an id, a path, a SID, a domain or a file name."""
+        text = text.strip().strip('"').strip()
         structured = (
-            attack_id(text) or _ABSOLUTE_PATH.match(text) or _SID.match(text) or registry_path(text)
+            attack_id(text)
+            or _ABSOLUTE_PATH.match(text)
+            or _UNIX_PATH.match(text)
+            or _SID.match(text)
+            or registry_path(text)
         )
-        return not structured and " " in text.strip()
+        return not structured and " " in text
 
     def _by_words(self, text: str, already: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Find techniques, software and WTFBins entries that share words with the query."""
         query = tokens(text)
         if not query:
             return []
+        # Words as written: the parts of `pass-the-hash` are one word, not three.
+        written = len({word for word in _TOKEN.findall(text.lower()) if word not in STOP_WORDS})
         shown = {(item.get("source"), item.get("id")) for item in already}
         scored = []
         for key, (name_words, summary_words) in self._words.items():
             name_hits, summary_hits = len(query & name_words), len(query & summary_words)
             enough = len(query & (name_words | summary_words)) >= min(MIN_WORD_MATCHES, len(query))
             # One word alone says too little to match on an entry's summary.
-            if enough and (len(query) > 1 or name_hits):
+            if enough and (written > 1 or name_hits):
                 scored.append((-(NAME_WEIGHT * name_hits + summary_hits), key))
         scored.sort()
         found: list[dict[str, Any]] = []
