@@ -93,6 +93,60 @@ def test_a_report_that_says_nothing_is_refused_once(report: dict[str, Any], miss
     assert again == Send({"submission": report})
 
 
+BENIGN_REPORT = {
+    "verdict": "benign",
+    "legitimacy_evidence": [
+        {"anchor": "entity", "entity_id": "file-1", "property_fields": ["path"]}
+    ],
+    "reasoning": "Signed vendor binary run by the updater.",
+}
+
+
+def test_a_benign_verdict_is_challenged_once_then_sent() -> None:
+    """The first benign report asks for the kill chain around the alert; the next one is sent."""
+    investigation = Investigation(observation())
+
+    challenged = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
+    again = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
+
+    assert isinstance(challenged, LocalAnswer)
+    assert "one stage before" in challenged.feedback["message"]
+    assert again == Send({"submission": BENIGN_REPORT})
+
+
+def test_a_placeholder_benign_report_is_refused_and_challenged_in_one_answer() -> None:
+    """The model gets one refusal with both reasons, not two refusals in a row."""
+    investigation = Investigation(observation())
+
+    refused = investigation.before_call(
+        FINISH_TOOL, {"submission": {**BENIGN_REPORT, "reasoning": ""}}
+    )
+    fixed = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
+
+    assert isinstance(refused, LocalAnswer)
+    assert "reasoning" in refused.feedback["message"]
+    assert "one stage before" in refused.feedback["message"]
+    assert fixed == Send({"submission": BENIGN_REPORT})
+
+
+@pytest.mark.parametrize(
+    ("report", "finish_only"),
+    [(REPORT, False), (BENIGN_REPORT, True)],
+    ids=["malicious", "benign-at-the-ceiling"],
+)
+def test_no_challenge_for_malicious_or_when_only_the_report_remains(
+    report: dict[str, Any], finish_only: bool
+) -> None:
+    """A malicious report is not questioned, and at the ceiling there is nothing left to open."""
+    investigation = Investigation(observation())
+
+    decision = investigation.before_call(
+        FINISH_TOOL, {"submission": report}, finish_only=finish_only
+    )
+
+    assert decision == Send({"submission": report})
+
+
 def test_a_catalog_without_the_report_tool_is_refused() -> None:
     """A task that cannot be finished is not started."""
     with pytest.raises(ValueError, match=FINISH_TOOL):
@@ -239,7 +293,14 @@ def test_local_decisions_are_traced(tmp_path: Path) -> None:
     investigation.before_call("get_entity", get_entity())
 
     investigation.before_call("lookup_knowledge", {"query": "x"})
+    investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
 
     kinds = [json.loads(line)["kind"] for line in path.read_text().splitlines()]
 
-    assert kinds == ["tool_rejected", "tool_invalid", "tool_cached", "tool_knowledge"]
+    assert kinds == [
+        "tool_rejected",
+        "tool_invalid",
+        "tool_cached",
+        "tool_knowledge",
+        "benign_challenged",
+    ]
