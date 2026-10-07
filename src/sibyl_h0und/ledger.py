@@ -267,6 +267,10 @@ class GraphLedger:
             object_kind = kind or _object_kind(node)
             if object_kind is not None:
                 self._add(object_id, object_kind)
+            if object_kind == "relation" and _is_full_relation(node):
+                # A search returns the same relation object as a fetch by id.
+                self.visited_relations.add(object_id)
+                _collect_keys(node, "", self.properties.setdefault(object_id, set()))
         for key, value in node.items():
             if key in ENTITY_ID_KEYS or key in ENTITY_LIST_KEYS:
                 self._collect(value, "entity")
@@ -312,6 +316,13 @@ def _object_kind(node: dict[str, Any]) -> str | None:
     if "relation_ids" in node:
         return "entity"
     return None
+
+
+def _is_full_relation(node: dict[str, Any]) -> bool:
+    """Tell whether a dict is a whole relation: type, both endpoints and its properties."""
+    return "properties" in node and all(
+        isinstance(node.get(key), str) for key in ("type", "source_id", "target_id")
+    )
 
 
 def _is_id_container(node: dict[str, Any]) -> bool:

@@ -108,6 +108,22 @@ class ToolCatalog:
         """Names of the advertised tools in catalog order."""
         return list(self._schemas)
 
+    def relation_search(self) -> str | None:
+        """Name the runtime tool that searches by `query` within a relation-type `scope`.
+
+        Returns:
+            The first such tool in catalog order, or `None`. Local tools and a
+            `scope` whose schema never mentions relations do not count.
+        """
+        for name, schema in self._schemas.items():
+            if name in self.local_names or schema is None:
+                continue
+            properties = schema["properties"]
+            scope = properties.get("scope")
+            if "query" in properties and "relation" in json.dumps(scope).lower():
+                return name
+        return None
+
     def is_local(self, tool_name: str) -> bool:
         """Tell whether the agent answers a catalog tool itself."""
         return tool_name in self.local_names
