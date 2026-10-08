@@ -287,6 +287,7 @@ def test_ledger_answers_invented_ids_and_repeats_without_the_runtime(tmp_path: P
             benign_finish_step("entity-invented", "pid"),
             benign_finish_step("entity-1", "digitial_signature"),
             benign_finish_step("entity-1", "pid"),
+            benign_finish_step("entity-1", "pid"),
         ]
     )
     session = FakeSession()
