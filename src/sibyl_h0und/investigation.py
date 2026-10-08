@@ -174,7 +174,7 @@ class Investigation:
             self.trace.local_answer("report_refused", tool, arguments, feedback)
             return LocalAnswer(feedback)
         if tool == KNOWLEDGE_TOOL and self.catalog.is_local(tool):
-            feedback = self._vocabulary.lookup(arguments["query"])
+            feedback = self._vocabulary.lookup(arguments["query"], arguments.get("terms"))
             self.trace.local_answer("tool_knowledge", tool, arguments, feedback)
             return LocalAnswer(feedback)
         decision = self._ledger.check(tool, arguments)
