@@ -25,6 +25,18 @@ NON_ALERT_FIELDS = frozenset({"available_tools", "last_tool_result"})
 MIN_REPORT_REASONING = 20
 # The list a report of each verdict must not leave empty.
 REPORT_CITATIONS = {"malicious": "ir_artifacts", "benign": "legitimacy_evidence"}
+# Asked once before a benign report reaches the runtime: practice runs called
+# attacks benign after a look at the trigger alone (ADR 0020).
+BENIGN_CHALLENGE = (
+    "A benign verdict overrules the detection that raised this alert, so check it once "
+    "before submitting. Answer from the evidence: why did the detection fire? What came "
+    "one stage before the trigger on the kill chain (how it started: parent, logon and "
+    "its source, delivery) and one stage after (what it led to: children, written or "
+    "changed files, persistence, connections and the hosts they reach)? If a stage is "
+    "not opened yet (`still_open` lists what is known but unvisited), open it; do not "
+    "repeat calls. If the evidence already answers all of this, submit the report "
+    "again, malicious or benign as the evidence says."
+)
 
 
 @dataclass(frozen=True)
@@ -84,6 +96,7 @@ class Investigation:
         self._ledger.observe_alert(self.alert)
         self._vocabulary = shared()
         self._report_refused = False
+        self._benign_challenged = False
         # A search scoped to a relation type lists an entity's relations by its id.
         self._relation_search = self.catalog.relation_search()
 
@@ -107,7 +120,9 @@ class Investigation:
 
         A tool outside the catalog or outside the allowed set, arguments that
         break the tool's schema, a knowledge lookup, an id the runtime never
-        returned and a repeated call are answered locally.
+        returned and a repeated call are answered locally. So are the first
+        placeholder report (ADR 0018) and the first benign report outside the
+        finish-only mode (ADR 0020).
 
         Args:
             tool: Tool the model chose.
@@ -139,14 +154,22 @@ class Investigation:
             logger.warning("Rejected invalid {} arguments locally: {}", tool, problem)
             self.trace.local_answer("tool_invalid", tool, arguments, feedback)
             return LocalAnswer(feedback)
+        challenge = (
+            tool == FINISH_TOOL
+            and not finish_only
+            and not self._benign_challenged
+            and report_verdict(arguments) == "benign"
+        )
         empty = report_problem(arguments) if tool == FINISH_TOOL else None
         if empty is not None and not self._report_refused:
             # Refused once: a second weak report still beats no report at all.
             self._report_refused = True
-            feedback = {
-                "status": "error",
-                "message": f"Not sent to the runtime: {empty} Submit the report again.",
-            }
+            message = f"Not sent to the runtime: {empty} Submit the report again."
+            if challenge:
+                # One refusal, not two in a row with different reasons.
+                self._benign_challenged = True
+                message = f"{message} {BENIGN_CHALLENGE}"
+            feedback = {"status": "error", "message": message}
             logger.warning("Refused an empty report once: {}", empty)
             self.trace.local_answer("report_refused", tool, arguments, feedback)
             return LocalAnswer(feedback)
@@ -159,6 +182,18 @@ class Investigation:
             logger.warning("Answered {} locally: {}.", tool, decision.reason)
             self.trace.local_answer(f"tool_{decision.reason}", tool, arguments, decision.feedback)
             return LocalAnswer(decision.feedback)
+        if challenge:
+            # Once: the model may still be right, and at the ceiling it cannot look further.
+            self._benign_challenged = True
+            feedback: dict[str, Any] = {
+                "status": "error",
+                "message": f"Not sent to the runtime: {BENIGN_CHALLENGE}",
+            }
+            if open_items := self._ledger.summary():
+                feedback["still_open"] = open_items
+            logger.warning("Challenged a benign verdict once before sending it.")
+            self.trace.local_answer("benign_challenged", tool, arguments, feedback)
+            return LocalAnswer(feedback)
         return Send(arguments)
 
     def after_call(self, tool: str, arguments: dict[str, Any], outcome: ToolOutcome) -> Reply:
@@ -205,8 +240,7 @@ def report_problem(arguments: dict[str, Any]) -> str | None:
     Returns:
         What is missing, or `None` for a report that can be sent.
     """
-    candidates = [arguments, *(value for value in arguments.values() if isinstance(value, dict))]
-    report = next((item for item in candidates if "verdict" in item), None)
+    report = find_report(arguments)
     if report is None:
         return None
     reasoning = report.get("reasoning")
@@ -219,3 +253,29 @@ def report_problem(arguments: dict[str, Any]) -> str | None:
     if citations is not None and report.get(citations) == []:
         return f"a {report['verdict']} report must cite entities in `{citations}`."
     return None
+
+
+def find_report(arguments: dict[str, Any]) -> dict[str, Any] | None:
+    """Find the report: the arguments or an object directly inside them with a `verdict`.
+
+    Args:
+        arguments: Prepared arguments of the report tool.
+
+    Returns:
+        The report object, or `None` for a report tool of another shape.
+    """
+    candidates = [arguments, *(value for value in arguments.values() if isinstance(value, dict))]
+    return next((item for item in candidates if "verdict" in item), None)
+
+
+def report_verdict(arguments: dict[str, Any]) -> str | None:
+    """Return the verdict of a report in lower case, or `None` when it has none.
+
+    Args:
+        arguments: Prepared arguments of the report tool.
+
+    Returns:
+        The verdict, or `None` when the report has no string verdict.
+    """
+    verdict = (find_report(arguments) or {}).get("verdict")
+    return verdict.strip().lower() if isinstance(verdict, str) else None
