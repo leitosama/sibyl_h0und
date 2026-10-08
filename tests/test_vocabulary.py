@@ -101,24 +101,54 @@ def found_by_terms(answer: dict[str, Any]) -> set[tuple[str, str, str]]:
     }
 
 
+def named(answer: dict[str, Any]) -> dict[str, list[str]]:
+    """Map each word the answer names to the entries it would bring."""
+    return {name["term"]: name["entries"] for name in answer.get("names", [])}
+
+
 @pytest.mark.parametrize(
-    ("query", "expected"),
+    ("query", "entries", "names"),
     [
-        ("sdelete.exe anti-forensics", {("sdelete.exe", "attack", "S0195")}),
-        ("rundll32 comsvcs dump", {("rundll32", "lolbas", "rundll32.exe")}),
-        ("sekurlsa::logonpasswords mimikatz", {("mimikatz", "attack", "S0002")}),
+        ("sdelete.exe anti-forensics", {("sdelete.exe", "attack", "S0195")}, {}),
+        ("rundll32 comsvcs dump", set(), {"rundll32": ["lolbas rundll32.exe"]}),
+        ("sekurlsa::logonpasswords mimikatz", set(), {"mimikatz": ["attack S0002 Mimikatz"]}),
         (
             "vssadmin delete shadows T1490",
-            {("vssadmin", "lolbas", "vssadmin.exe"), ("T1490", "attack", "T1490")},
+            {("T1490", "attack", "T1490")},
+            {"vssadmin": ["lolbas vssadmin.exe"]},
         ),
-        ("shadows deleted (vssadmin.exe).", {("vssadmin.exe", "lolbas", "vssadmin.exe")}),
+        ("shadows deleted (vssadmin.exe).", {("vssadmin.exe", "lolbas", "vssadmin.exe")}, {}),
+        ("/tmp/x.sh was run by vssadmin", set(), {"vssadmin": ["lolbas vssadmin.exe"]}),
     ],
 )
-def test_terms_inside_a_description_are_looked_up_as_terms(
-    query: str, expected: set[tuple[str, str, str]]
+def test_terms_inside_a_description_are_answered_and_program_names_are_named(
+    query: str, entries: set[tuple[str, str, str]], names: dict[str, list[str]]
 ) -> None:
-    """Context words around a known term no longer hide it (issue #40)."""
-    assert found_by_terms(shared().lookup(query)) == expected
+    """Context words no longer hide a term (issue #40); a bare program name is pointed to."""
+    answer = shared().lookup(query)
+
+    assert found_by_terms(answer) == entries
+    assert named(answer) == names
+
+
+def test_an_ordinary_word_that_names_a_program_is_pointed_to_not_answered() -> None:
+    """Whether `play` means the Play ransomware is the model's call, not the code's."""
+    answer = shared().lookup("something play happened")
+
+    assert answer["matches"] == []
+    assert named(answer) == {"play": ["attack S1162 Playcrypt"]}
+    assert "note" not in answer
+
+
+def test_a_named_word_asked_in_terms_brings_its_entry_and_is_not_named_again() -> None:
+    """The model gets the entry by asking for the name as a term."""
+    answer = shared().lookup("vssadmin delete shadows T1490", ["vssadmin"])
+
+    assert found_by_terms(answer) == {
+        ("T1490", "attack", "T1490"),
+        ("vssadmin", "lolbas", "vssadmin.exe"),
+    }
+    assert "names" not in answer
 
 
 @pytest.mark.parametrize("query", ["wsmprovhost.exe", "w3wp.exe", "sdclt.exe"])
@@ -126,19 +156,18 @@ def test_an_unknown_program_stays_an_honest_miss(query: str) -> None:
     """A program no source lists gets no entry, alone or among other terms."""
     assert shared().lookup(query)["matches"] == []
     assert shared().lookup("vssadmin", [query])["not_found"] == [query]
-
-
-@pytest.mark.parametrize("query", ["remote access tool control", "update the query", "play royal"])
-def test_ordinary_words_in_a_description_are_not_program_names(query: str) -> None:
-    """`remote` is not `remote.exe` and `play` is not the Play ransomware."""
-    assert found_by_terms(shared().lookup(query)) == set()
+    assert shared().lookup("something play happened", [query])["not_found"] == [query]
 
 
 @pytest.mark.parametrize(
     ("query", "row"),
-    [("logon by S-1-5-18", "account"), ("dropped a .ps1 script", "extension")],
+    [
+        ("logon by S-1-5-18", "account"),
+        ("dropped a .ps1 script", "extension"),
+        ('"C:\\Windows\\Temp\\x.ps1"', "location"),
+    ],
 )
-def test_a_sid_or_an_extension_in_a_description_gets_its_cheat_sheet_row(
+def test_cheat_sheet_rows_come_back_for_terms_in_descriptions_and_quoted_paths(
     query: str, row: str
 ) -> None:
     """Every kind of term a single query can be is also found inside a description."""
@@ -171,6 +200,7 @@ def test_a_lookup_stops_after_ten_searches_with_entries_and_names_the_rest() -> 
     answer = shared().lookup(terms[0], terms[1:])
 
     assert answer["skipped"] == terms[10:]
+    assert "not_found" not in answer
     assert {match["term"] for match in answer["matches"]} == set(terms[:10])
 
 

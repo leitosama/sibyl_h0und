@@ -111,6 +111,8 @@ Knowledge vocabulary (`{KNOWLEDGE_TOOL}`):
   file name or original file name, a SHA-256, a registry key path, a domain or a tool
   name. Technique ids and ATT&CK terms find better entries than business wording.
   Put several terms of one hypothesis in `terms` of a single lookup.
+  `names` lists words of your query that a source has a program by; look one up only
+  if you mean that program.
 - Weigh both readings; neither a match nor an empty answer decides the verdict.
   Entries are given as the sources state them, with no verdict. An empty answer means
   the sources have no entry, not that the term is safe. Do not repeat a lookup.
