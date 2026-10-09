@@ -6,7 +6,7 @@ import pytest
 
 from sibyl_h0und.catalog import FINISH_TOOL
 from sibyl_h0und.investigation import Investigation, LocalAnswer, Review, Send
-from sibyl_h0und.models import Challenge
+from sibyl_h0und.models import Challenge, ToolCall
 from sibyl_h0und.outcome import ToolOutcome
 from sibyl_h0und.trace import TaskTrace
 
@@ -44,6 +44,13 @@ def observation(specs: list[dict[str, Any]] = CATALOG) -> dict[str, Any]:
     }
 
 
+def to_reporter(decision: LocalAnswer | Send | Review) -> dict[str, Any]:
+    """Return the report a decision hands to the reporter, failing on any other decision."""
+    assert isinstance(decision, Review)
+    assert decision.role == "reporter"
+    return decision.arguments
+
+
 def get_entity(entity_id: str = "file-1") -> dict[str, Any]:
     """Arguments of a valid `get_entity` call."""
     return {"entity_id": entity_id, "reasoning": "Inspect."}
@@ -67,7 +74,7 @@ def test_only_the_report_is_allowed_when_finish_only() -> None:
 
     assert isinstance(refused, LocalAnswer)
     assert FINISH_TOOL in refused.feedback["message"]
-    assert allowed == Send({"submission": REPORT})
+    assert to_reporter(allowed) == {"submission": REPORT}
 
 
 @pytest.mark.parametrize(
@@ -91,7 +98,7 @@ def test_a_report_that_says_nothing_is_refused_once(report: dict[str, Any], miss
 
     assert isinstance(refused, LocalAnswer)
     assert missing in refused.feedback["message"]
-    assert again == Send({"submission": report})
+    assert to_reporter(again) == {"submission": report}
 
 
 BENIGN_REPORT = {
@@ -160,7 +167,7 @@ def test_the_challengers_usable_checks_reach_the_model_and_the_next_report_is_se
             }
         ],
     }
-    assert again == Send({"submission": BENIGN_REPORT})
+    assert to_reporter(again) == {"submission": BENIGN_REPORT}
 
 
 @pytest.mark.parametrize(
@@ -190,6 +197,108 @@ def test_without_a_usable_challenge_the_model_gets_the_general_question(
     assert event["fallback"] == (error or "no usable check")
 
 
+def report_call(report: dict[str, Any]) -> ToolCall:
+    """A reporter reply that submits this report."""
+    return ToolCall.model_validate({"tool": FINISH_TOOL, "submission": report})
+
+
+REWRITTEN_REPORT = {
+    **REPORT,
+    "ir_artifacts": [{"entity_id": "file-1", "kind": "file_to_delete"}],
+    "reasoning": "A script dropped into System32 by the alert's process.",
+}
+
+
+def test_the_reporters_report_is_sent_and_it_sees_the_draft_evidence_and_challenge(
+    tmp_path: Path,
+) -> None:
+    """After a challenge, the next report goes to the reporter with the challenger's case;
+    the reporter's checked report is what reaches the runtime."""
+    path = tmp_path / "t.trace.jsonl"
+    investigation = fetched_file_investigation(path)
+    review = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
+    assert isinstance(review, Review)
+    investigation.after_review(
+        review, challenge({"tool": "get_entity", "entity_id": "file-1", "reasoning": "x"})
+    )
+
+    reporter = investigation.before_call(FINISH_TOOL, {"submission": REPORT})
+    assert isinstance(reporter, Review)
+    request = json.loads(reporter.messages[-1]["content"])
+    sent = investigation.after_review(reporter, report_call(REWRITTEN_REPORT))
+
+    assert request["draft_report"] == {"submission": REPORT}
+    assert request["challenge"]["hypothesis"].startswith("The script in System32")
+    assert request["evidence"]["no_host"]["entities"] == [DROPPED_FILE]
+    assert sent == Send({"submission": REWRITTEN_REPORT})
+    event = json.loads(path.read_text().splitlines()[-1])
+    assert (event["kind"], event["fallback"]) == ("report_written", None)
+
+
+@pytest.mark.parametrize(
+    ("reply", "problem"),
+    [
+        (report_call({**BENIGN_REPORT, "verdict": "benign"}), "verdict must stay"),
+        (
+            report_call({**REPORT, "ir_artifacts": [{"entity_id": "file-404", "kind": "other"}]}),
+            "file-404",
+        ),
+        (report_call({**REPORT, "reasoning": "Short test"}), "reasoning"),
+        (ToolCall.model_validate({"tool": "get_entity", "entity_id": "file-1"}), "must call"),
+    ],
+    ids=["verdict-changed", "invented-id", "placeholder", "another-tool"],
+)
+def test_an_unusable_report_is_repaired_once_then_the_draft_is_sent(
+    tmp_path: Path, reply: ToolCall, problem: str
+) -> None:
+    """The reporter may not change the verdict or cite what the runtime never returned:
+    it is told why once, and a second miss sends the investigation's own report."""
+    path = tmp_path / "t.trace.jsonl"
+    investigation = fetched_file_investigation(path)
+    reporter = investigation.before_call(FINISH_TOOL, {"submission": REPORT})
+    assert isinstance(reporter, Review)
+
+    repair = investigation.after_review(reporter, reply)
+    assert isinstance(repair, Review)
+    sent = investigation.after_review(repair, reply)
+
+    assert problem in repair.messages[-1]["content"]
+    assert sent == Send({"submission": REPORT})
+    event = json.loads(path.read_text().splitlines()[-1])
+    assert problem in event["fallback"]
+
+
+def test_a_rewritten_report_the_runtime_refused_is_shown_and_never_sent_twice() -> None:
+    """The model learns which report the runtime answered, and the same rewrite of its
+    next draft is answered from the ledger instead of costing another call."""
+    investigation = fetched_file_investigation()
+    reporter = investigation.before_call(FINISH_TOOL, {"submission": REPORT})
+    assert isinstance(reporter, Review)
+    sent = investigation.after_review(reporter, report_call(REWRITTEN_REPORT))
+    assert isinstance(sent, Send)
+
+    refused = ToolOutcome("error", None, "invalid artifact kind")
+    reply = investigation.after_call(FINISH_TOOL, sent.arguments, refused)
+    again = investigation.before_call(FINISH_TOOL, {"submission": REPORT})
+    assert isinstance(again, Review)
+    repeat = investigation.after_review(again, report_call(REWRITTEN_REPORT))
+
+    assert reply.feedback["sent_report"] == {"submission": REWRITTEN_REPORT}
+    assert isinstance(repeat, LocalAnswer)
+    assert repeat.feedback["error"] == "invalid artifact kind"
+
+
+def test_a_failed_reporter_sends_the_draft_without_a_repair_turn() -> None:
+    """With no reply to repair, the investigation's own report goes to the runtime."""
+    investigation = fetched_file_investigation()
+    reporter = investigation.before_call(FINISH_TOOL, {"submission": REPORT})
+    assert isinstance(reporter, Review)
+
+    assert investigation.after_review(reporter, None, "APITimeoutError") == Send(
+        {"submission": REPORT}
+    )
+
+
 def test_a_placeholder_benign_report_is_refused_and_challenged_in_one_answer() -> None:
     """The model gets one refusal with both reasons, not two refusals in a row."""
     investigation = Investigation(observation())
@@ -202,7 +311,7 @@ def test_a_placeholder_benign_report_is_refused_and_challenged_in_one_answer() -
     assert isinstance(refused, LocalAnswer)
     assert "reasoning" in refused.feedback["message"]
     assert "one stage before" in refused.feedback["message"]
-    assert fixed == Send({"submission": BENIGN_REPORT})
+    assert to_reporter(fixed) == {"submission": BENIGN_REPORT}
 
 
 @pytest.mark.parametrize(
@@ -220,7 +329,7 @@ def test_no_challenge_for_malicious_or_when_only_the_report_remains(
         FINISH_TOOL, {"submission": report}, finish_only=finish_only
     )
 
-    assert decision == Send({"submission": report})
+    assert to_reporter(decision) == {"submission": report}
 
 
 def test_a_catalog_without_the_report_tool_is_refused() -> None:

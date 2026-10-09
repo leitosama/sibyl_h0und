@@ -16,10 +16,11 @@ from bluesec1_client import (
 )
 from sibyl_h0und.agent import SYSTEM_PROMPT, SimpleSGRAgent
 from sibyl_h0und.catalog import FINISH_TOOL
-from sibyl_h0und.challenge_replay import challenge, load_cases
+from sibyl_h0und.investigation import Send
 from sibyl_h0und.llm import NextStepRequestError
-from sibyl_h0und.models import PRACTICE_ARGUMENT_MODELS, Challenge, NextStep
+from sibyl_h0und.models import PRACTICE_ARGUMENT_MODELS, Challenge, NextStep, ToolCall
 from sibyl_h0und.replay import load_tasks
+from sibyl_h0und.side_replay import load_cases, side_turn
 from sibyl_h0und.trace import TaskTrace
 from sibyl_h0und.vocabulary import KNOWLEDGE_TOOL
 
@@ -35,18 +36,25 @@ TOOL_CATALOG = json.dumps(
 class FakeStepClient:
     """Deterministic structured steps used by the agent unit test."""
 
-    def __init__(self, steps: list[NextStep], challenges: tuple[Challenge, ...] = ()) -> None:
-        """Store steps and challenger replies in their expected request order.
+    def __init__(
+        self,
+        steps: list[NextStep],
+        challenges: tuple[Challenge, ...] = (),
+        reports: tuple[ToolCall, ...] = (),
+    ) -> None:
+        """Store steps and side-turn replies in their expected request order.
 
         Args:
             steps: Prepared LLM steps.
-            challenges: Prepared challenger replies; with none left, the
-                challenger fails as a provider would.
+            challenges: Prepared challenger replies.
+            reports: Prepared reporter replies. With no reply left, a side
+                turn fails as a provider would.
         """
         self.steps = list(steps)
         self.challenges = list(challenges)
+        self.reports = list(reports)
         self.requests: list[list[dict[str, Any]]] = []
-        self.side_requests: list[list[dict[str, Any]]] = []
+        self.side_requests: dict[str, list[list[dict[str, Any]]]] = {}
         self.formats: list[dict[str, Any]] = []
 
     async def next_step(
@@ -84,10 +92,11 @@ class FakeStepClient:
         Raises:
             NextStepRequestError: When no reply is prepared.
         """
-        self.side_requests.append([dict(message) for message in messages])
-        if not self.challenges:
+        self.side_requests.setdefault(role, []).append([dict(message) for message in messages])
+        replies = self.challenges if role == "challenger" else self.reports
+        if not replies:
             raise NextStepRequestError("No valid reply.")
-        return self.challenges.pop(0)
+        return replies.pop(0)
 
 
 class FakeSession:
@@ -264,6 +273,7 @@ def test_agent_executes_fresh_structured_task_via_remote_session(tmp_path: Path)
         "step",
         "tool_call",
         "step",
+        "report_written",
         "tool_call",
         "task_end",
     ]
@@ -446,7 +456,10 @@ CHALLENGE = Challenge.model_validate(
 
 
 def challenged_run(
-    tmp_path: Path, steps: list[NextStep] | None = None, max_runtime_calls: int = 95
+    tmp_path: Path,
+    steps: list[NextStep] | None = None,
+    max_runtime_calls: int = 95,
+    reports: tuple[ToolCall, ...] = (),
 ) -> tuple[FakeStepClient, FakeSession]:
     """Run a task; by default its benign report is challenged and then turned malicious."""
     llm = FakeStepClient(
@@ -456,7 +469,8 @@ def challenged_run(
             benign_finish_step("entity-1", "pid"),
             make_step("finish_investigation", submission=MALICIOUS_SUBMISSION),
         ],
-        [CHALLENGE],
+        (CHALLENGE,),
+        reports,
     )
     session = FakeSession()
     agent = SimpleSGRAgent(llm, max_runtime_calls=max_runtime_calls, trace_dir=tmp_path / "traces")
@@ -473,7 +487,7 @@ def test_a_benign_report_is_challenged_from_the_evidence_and_costs_no_runtime_ca
 
     assert [name for name, _ in session.calls] == ["get_entity", "finish_investigation"]
     assert session.calls[1][1] == {"submission": MALICIOUS_SUBMISSION}
-    (side,) = llm.side_requests
+    (side,) = llm.side_requests["challenger"]
     assert "Signed vendor binary" not in json.dumps(side)
     assert '"pid": 42' in side[-1]["content"]
     answer = json.loads(llm.requests[2][-1]["content"])
@@ -489,9 +503,9 @@ def test_the_harness_rebuilds_the_challenger_turn_from_a_trace_the_agent_wrote(
 
     (case,) = load_cases(tmp_path / "traces")
     replay_llm = FakeStepClient([], [CHALLENGE])
-    answer = asyncio.run(challenge(case, replay_llm))
+    answer = asyncio.run(side_turn(case, replay_llm))
 
-    assert replay_llm.side_requests == llm.side_requests
+    assert replay_llm.side_requests["challenger"] == llm.side_requests["challenger"]
     assert answer.feedback == json.loads(llm.requests[2][-1]["content"])
     assert case.final_verdict == "malicious"
     assert case.split in {"dev", "holdout"}
@@ -524,6 +538,46 @@ def test_the_harness_skips_a_benign_report_the_live_agent_never_challenged(
     is no challenger case."""
     llm, session = challenged_run(tmp_path, steps, max_runtime_calls)
 
-    assert llm.side_requests == []
+    assert "challenger" not in llm.side_requests
     assert session.calls[-1][0] == FINISH_TOOL
     assert list(load_cases(tmp_path / "traces")) == []
+
+
+def test_the_reporters_report_reaches_the_runtime_after_one_repair(tmp_path: Path) -> None:
+    """A report the reporter must repair goes back to it once; the repaired one is sent."""
+    invented = {**MALICIOUS_SUBMISSION, "ir_artifacts": [{"entity_id": "x-9", "kind": "other"}]}
+    repaired = {**MALICIOUS_SUBMISSION, "reasoning": "entity-1 ran the suspicious chain."}
+    llm = FakeStepClient(
+        investigation_steps(),
+        reports=(
+            ToolCall.model_validate({"tool": FINISH_TOOL, "submission": invented}),
+            ToolCall.model_validate({"tool": FINISH_TOOL, "submission": repaired}),
+        ),
+    )
+    session = FakeSession()
+    agent = SimpleSGRAgent(llm, trace_dir=tmp_path)
+
+    asyncio.run(agent.run(cast(RemoteBenchmarkClient, FakeClient(session))))
+
+    assert session.calls[-1] == (FINISH_TOOL, {"submission": repaired})
+    first, second = llm.side_requests["reporter"]
+    assert "x-9" in second[-1]["content"]
+    assert second[: len(first)] == first
+
+
+def test_the_harness_replays_the_reporter_turn_as_the_agent_asked_it(tmp_path: Path) -> None:
+    """Cut at the report that was sent, a saved task gives the reporter the head's draft,
+    not the rewrite the runtime got, and asks what the live agent asked, the challenger's
+    recorded case included."""
+    rewrite = {**MALICIOUS_SUBMISSION, "reasoning": "entity-1 ran the suspicious chain."}
+    report = ToolCall.model_validate({"tool": FINISH_TOOL, "submission": rewrite})
+    llm, session = challenged_run(tmp_path, reports=(report,))
+
+    (case,) = load_cases(tmp_path / "traces", role="reporter")
+    replay_llm = FakeStepClient([], reports=(report,))
+    answer = asyncio.run(side_turn(case, replay_llm))
+
+    assert session.calls[-1][1] == {"submission": rewrite}
+    assert case.review.arguments == {"submission": MALICIOUS_SUBMISSION}
+    assert replay_llm.side_requests["reporter"] == llm.side_requests["reporter"]
+    assert answer == Send({"submission": rewrite})

@@ -13,7 +13,7 @@ from bluesec1_client import (
 )
 from sibyl_h0und.budget import DEFAULT_MAX_RUNTIME_CALLS, CallBudget
 from sibyl_h0und.catalog import FINISH_TOOL
-from sibyl_h0und.investigation import Investigation, LocalAnswer, Review
+from sibyl_h0und.investigation import Investigation, LocalAnswer, Review, Send
 from sibyl_h0und.llm import StructuredStepClient, render_json
 from sibyl_h0und.outcome import ToolOutcome
 from sibyl_h0und.trace import TaskTrace, elapsed_ms, run_trace_dir, task_trace_path
@@ -162,7 +162,7 @@ async def run_review(
     investigation: Investigation,
     review: Review,
     trace: TaskTrace | None = None,
-) -> LocalAnswer:
+) -> LocalAnswer | Send | Review:
     """Run a side turn of the LLM and let the investigation answer the call.
 
     The side turn is optional: whatever makes it fail, the investigation
@@ -175,7 +175,8 @@ async def run_review(
         trace: Task trace that receives the side turn's `llm_call` events.
 
     Returns:
-        The local answer to the model's call.
+        The investigation's answer: a local answer, the call to send, or
+        another side turn.
     """
     try:
         reply = await llm.structured(
@@ -189,6 +190,28 @@ async def run_review(
         logger.warning("The {} turn failed: {}", review.role, exc)
         return investigation.after_review(review, None, f"{type(exc).__name__}: {exc}"[:500])
     return investigation.after_review(review, reply)
+
+
+async def settle(
+    llm: StructuredStepClient,
+    investigation: Investigation,
+    decision: LocalAnswer | Send | Review,
+    trace: TaskTrace | None = None,
+) -> LocalAnswer | Send:
+    """Run side turns until the call is answered locally or ready to send.
+
+    Args:
+        llm: The LLM client.
+        investigation: The task's investigation.
+        decision: What `before_call` decided.
+        trace: Task trace that receives the side turns' `llm_call` events.
+
+    Returns:
+        The local answer, or the call to send.
+    """
+    while isinstance(decision, Review):
+        decision = await run_review(llm, investigation, decision, trace)
+    return decision
 
 
 class AgentRunResult(BaseModel):
@@ -359,8 +382,7 @@ class SimpleSGRAgent:
             decision = investigation.before_call(
                 tool_name, step.function.arguments, finish_only=finish_only
             )
-            if isinstance(decision, Review):
-                decision = await run_review(self.llm, investigation, decision, trace)
+            decision = await settle(self.llm, investigation, decision, trace)
             if isinstance(decision, LocalAnswer):
                 budget.record_local_answer()
                 feedback = decision.feedback

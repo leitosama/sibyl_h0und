@@ -83,11 +83,12 @@ traces/
 | `kind` | Плоские поля | `payload` |
 | --- | --- | --- |
 | `task_start` | — | `run`: настройки run'а без секретов (модель, лимиты, арена); `task`: задача целиком, включая `observation` и `available_tools` |
-| `llm_call` | `role` (`head` или `challenger`), `attempt`, `tokens` | `prefix`, `messages`: новые сообщения запроса (см. ниже), `raw_content` (ответ модели как есть) |
+| `llm_call` | `role` (`head`, `challenger` или `reporter`), `attempt`, `tokens` | `prefix`, `messages`: новые сообщения запроса (см. ниже), `raw_content` (ответ модели как есть) |
 | `step` | `tool` | `step`: разобранный `NextStep` |
 | `tool_call` | `tool`, `status`, `reward`, `terminated`, `truncated` или `error` | `arguments`, `response`: полный `ToolCallResult` от runtime |
 | `tool_rejected` | `tool` | `arguments` вызова, отклонённого локально (инструмента нет в каталоге или GraphLedger не знает id), `feedback`: ответ модели |
 | `report_refused` | `tool` | `arguments` отчёта-заглушки, отклонённого локально один раз за задачу (ADR 0018), и `feedback`: ответ модели |
+| `report_written` | `fallback`: почему ушёл черновик головы, или `null` | `draft`: черновик головы, `report`: отчёт репортёра, который ушёл в runtime (ADR 0023) |
 | `benign_challenged` | `tool`, `fallback`: почему вместо челленджера общий вопрос, или `null` | `arguments` отчёта с вердиктом `benign`, возвращённого модели на проверку один раз за задачу (ADR 0020, 0022), и `feedback`: ответ модели, с версией и проверками челленджера в `challenge` |
 | `tool_cached` | `tool` | `arguments` повторного вызова и `feedback`: прежний ответ из кэша GraphLedger |
 | `task_end` | `completion_reason`, `total_reward`, `quality_score`, `efficiency_score`, `tool_calls`, `steps_taken`, `agent_steps`, `runtime_calls`, `llm_calls`, `llm_tokens`, `llm_ms`, `error` | `task_result` |
@@ -179,17 +180,21 @@ uv run python scripts/replay_knowledge.py --compare before # что измени
 Источник Nextron отвечает на любой путь, поэтому его строка почти всегда
 полная.
 
-### Стенд челленджера
+### Стенд побочных ходов
 
-`scripts/replay_challenger.py` режет каждый трейс на первом benign-отчёте,
-восстанавливает расследование из вызовов runtime до него и запускает только
-челленджер (ADR 0022) с LLM из `.env`. Runtime не нужен; трейсы читаются на
-месте и никуда не копируются.
+`scripts/replay_side_turn.py` проигрывает каждый трейс так, как шёл живой
+агент (вызовы runtime, отказы, режим «только отчёт»), до отчёта, который
+попадает в выбранный побочный ход, и запускает только его с LLM из `.env`:
+`--role challenger` (по умолчанию) — первый benign-отчёт (ADR 0022),
+`--role reporter` — отчёт, который ушёл в runtime (ADR 0023); челлендж по
+дороге берётся из трейса. Runtime не нужен; трейсы читаются на месте и
+никуда не копируются.
 
 ```bash
-uv run python scripts/replay_challenger.py                          # dev-половина
-uv run python scripts/replay_challenger.py --wrong-only --run 20261008
-uv run python scripts/replay_challenger.py --split holdout --out /tmp/holdout.jsonl
+uv run python scripts/replay_side_turn.py                          # челленджер, dev-половина
+uv run python scripts/replay_side_turn.py --wrong-only --run 20261008
+uv run python scripts/replay_side_turn.py --split holdout --out /tmp/holdout.jsonl
+uv run python scripts/replay_side_turn.py --role reporter          # ссылки черновика и репортёра
 ```
 
 Задачи делятся на `dev` и `holdout` по хешу id задачи; на `practice` id
@@ -198,7 +203,9 @@ uv run python scripts/replay_challenger.py --split holdout --out /tmp/holdout.js
 подстройки. Неверной считаем задачу, которая кончилась `benign` с
 `quality_score` ниже `--wrong-below`. На неверных смотрим, указывает ли
 проверка на ту часть графа, где была атака; на верных — что проверки дешёвые
-и опровержимые, а версия не противоречит уликам.
+и опровержимые, а версия не противоречит уликам. Для репортёра неверной
+считаем любую задачу с низким `quality_score` и смотрим, какие ссылки он
+добавил и убрал по сравнению с черновиком.
 
 ### Пакеты знаний
 
