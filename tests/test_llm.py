@@ -26,17 +26,19 @@ from sibyl_h0und.trace import TaskTrace, llm_requests
 class FakeCompletions:
     """Queue-backed fake for the OpenAI chat completion endpoint."""
 
-    def __init__(self, contents: list[str | Exception]) -> None:
+    def __init__(self, contents: list[str | Exception | SimpleNamespace]) -> None:
         """Store response content and request audit state."""
         self.contents = list(contents)
         self.requests: list[dict[str, Any]] = []
 
     async def create(self, **kwargs: Any) -> Any:
-        """Return the next queued assistant message or raise the queued error."""
+        """Return the next queued assistant message or response, or raise the queued error."""
         self.requests.append({**kwargs, "messages": list(kwargs["messages"])})
         content = self.contents.pop(0)
         if isinstance(content, Exception):
             raise content
+        if isinstance(content, SimpleNamespace):
+            return content
         return SimpleNamespace(
             choices=[
                 SimpleNamespace(
@@ -53,7 +55,7 @@ class FakeCompletions:
 class FakeOpenAI:
     """Minimal object graph required by `OpenAIStructuredStepClient`."""
 
-    def __init__(self, contents: list[str | Exception]) -> None:
+    def __init__(self, contents: list[str | Exception | SimpleNamespace]) -> None:
         """Expose fake chat completions."""
         self.completions = FakeCompletions(contents)
         self.chat = SimpleNamespace(completions=self.completions)
@@ -124,6 +126,45 @@ def test_structured_client_repairs_malformed_response(tmp_path: Path) -> None:
     ]
     assert len(events[2]["payload"]["messages"]) == 2
     assert (trace.llm_calls, trace.llm_tokens) == (3, 51)
+
+
+def test_structured_client_repairs_a_reply_without_a_usable_message(tmp_path: Path) -> None:
+    """A refusal or empty `choices` is traced and repaired instead of aborting the task."""
+    refusal = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=None, refusal="No."))],
+        usage=SimpleNamespace(total_tokens=5),
+    )
+    no_choices = SimpleNamespace(choices=[], usage=None)
+    valid = valid_process_step().model_dump_json()
+    fake_openai = FakeOpenAI([refusal, no_choices, valid])
+    client = OpenAIStructuredStepClient(
+        base_url="https://llm.example/v1",
+        api_key="secret",
+        model="test-model",
+        timeout_seconds=10.0,
+        max_completion_tokens=1000,
+        max_retries=3,
+        client=cast(AsyncOpenAI, fake_openai),
+    )
+    trace = TaskTrace(tmp_path / "task.trace.jsonl")
+
+    step = asyncio.run(
+        client.next_step(
+            [{"role": "system", "content": "Investigate."}],
+            response_format=STEP_FORMAT,
+            trace=trace,
+        )
+    )
+
+    assert step.function.tool == "get_entity"
+    repaired_messages = fake_openai.completions.requests[1]["messages"]
+    assert repaired_messages[-2] == {"role": "assistant", "content": "<empty>"}
+    events = [json.loads(line) for line in trace.path.read_text(encoding="utf-8").splitlines()]
+    assert [event["attempt"] for event in events] == [1, 2, 3]
+    assert "refused" in events[0]["error"]
+    assert "missing choices" in events[1]["error"]
+    assert "error" not in events[2]
+    assert trace.llm_calls == 3
 
 
 def test_parser_drops_envelope_keys_the_agent_does_not_read() -> None:
