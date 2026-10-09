@@ -141,7 +141,7 @@ REPORT_REPAIR = (
     "This report cannot be sent: {problem} Return the corrected report as one JSON object "
     "matching the schema."
 )
-# What the challenger is told once when a check repeats a call (ADR 0025).
+# What the challenger is told once when a check repeats a call (ADR 0026).
 CHALLENGE_REPAIR = (
     "Some checks need a fix: {problems} Fix them: cite a fact the evidence holds as "
     "`seen`, or give a call that opens something still unvisited, such as one of an entity's "
@@ -293,7 +293,7 @@ class Investigation:
             arguments: Arguments the model chose, without nulls.
             finish_only: Whether only `finish_investigation` may be called.
             state: The model's `current_state` of this step; after a challenge,
-                a report's state holds the answers to the checks (ADR 0025).
+                a report's state holds the answers to the checks (ADR 0026).
 
         Returns:
             A local answer, the prepared arguments to send, or the side turn
@@ -594,7 +594,7 @@ class Investigation:
         repeated one is kept as `already_made` but still reported. A `seen`
         fact must name an object the runtime returned and fields it holds;
         their values are shown. A check whose source repeats an earlier one is
-        dropped (ADR 0025).
+        dropped (ADR 0026).
 
         Returns:
             The usable checks and one sentence per check that needs a repair.

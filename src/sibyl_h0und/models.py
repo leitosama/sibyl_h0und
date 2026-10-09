@@ -377,7 +377,7 @@ class SeenSource(BaseModel):
 
 
 class ChallengeCheck(BaseModel):
-    """One fact that decides the challenger's attack hypothesis (ADR 0025)."""
+    """One fact that decides the challenger's attack hypothesis (ADR 0026)."""
 
     model_config = ConfigDict(extra="ignore")
 

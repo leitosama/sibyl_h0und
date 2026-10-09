@@ -237,7 +237,8 @@ def test_structured_client_retries_only_transient_provider_errors(
 
 def test_a_side_turn_sends_only_its_own_request_and_is_traced_by_role(tmp_path: Path) -> None:
     """A challenger turn between two head steps gets no step instructions, repairs against
-    its own schema, and leaves events that name its role and rebuild every request."""
+    its own schema, goes to the challenger's model, and leaves events that name its role
+    and model and rebuild every request."""
     step = valid_process_step().model_dump_json()
     reply = json.dumps(
         {
@@ -260,6 +261,7 @@ def test_a_side_turn_sends_only_its_own_request_and_is_traced_by_role(tmp_path: 
         timeout_seconds=10.0,
         max_completion_tokens=1000,
         max_retries=3,
+        role_models={"challenger": "challenger-model"},
         client=cast(AsyncOpenAI, fake_openai),
     )
     trace = TaskTrace(tmp_path / "task.trace.jsonl")
@@ -281,6 +283,9 @@ def test_a_side_turn_sends_only_its_own_request_and_is_traced_by_role(tmp_path: 
     assert "schema" in requests[2][-1]["content"]
     events = [json.loads(line) for line in trace.path.read_text(encoding="utf-8").splitlines()]
     assert [event["role"] for event in events] == ["head", "challenger", "challenger", "head"]
+    models = ["test-model", "challenger-model", "challenger-model", "test-model"]
+    assert [request["model"] for request in fake_openai.completions.requests] == models
+    assert [event["model"] for event in events] == models
     assert llm_requests(events) == requests
     # The head's next request stores only what it added, not its whole history again.
     assert events[3]["payload"]["prefix"] == 1

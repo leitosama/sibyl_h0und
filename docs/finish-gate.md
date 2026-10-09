@@ -101,7 +101,7 @@ class Review:
 
 - **Вход:** алерт, дайджест, `still_open`. Текста головы не видит.
 - **Ответ:** `{hypothesis, checks: [{look_for, confirms_if, refuted_if, source}]}`,
-  от 1 до 3 проверок ([ADR 0025](adr/0025-challenge-checks-name-the-deciding-fact.md)).
+  от 1 до 3 проверок ([ADR 0026](adr/0026-challenge-checks-name-the-deciding-fact.md)).
   `source` — либо `call: {tool, ...аргументы}` для факта, которого ещё нет
   (`tool` из каталога, id проходят `ledger.is_known`), либо
   `seen: {evidence_id, property_fields}` для факта, который уже в дайджесте
@@ -126,7 +126,7 @@ class Review:
   запись челленджа и ответ головы на него (`challenge.answers`), если челлендж
   был. Benign-отчёт — короткая цепочка сущностей (триггер, кто запустил,
   учётная запись, объект действия), обычно 3–5 пунктов; связь — только когда
-  она сама объяснение (ADR 0025).
+  она сама объяснение (ADR 0026).
 - **Ответ:** схема finish из каталога задачи
   (`catalog.response_format([FINISH_TOOL])`), так что другая форма отчёта на
   зачёте тоже работает (ADR 0003, 0014).

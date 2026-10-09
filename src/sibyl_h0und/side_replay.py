@@ -134,7 +134,7 @@ def build_case(task: RecordedTask, role: str = CHALLENGER_ROLE) -> Case | None:
 def recorded_challenge(feedback: dict[str, Any] | None) -> tuple[Challenge | None, str | None]:
     """Read the challenge a trace recorded, or say why there is none.
 
-    Traces written before ADR 0025 hold checks of another shape; their
+    Traces written before ADR 0026 hold checks of another shape; their
     challenge reads as missing.
     """
     recorded = (feedback or {}).get("challenge")
@@ -152,7 +152,7 @@ def recorded_challenge(feedback: dict[str, Any] | None) -> tuple[Challenge | Non
     try:
         return Challenge.model_validate({**recorded, "checks": checks}), None
     except ValidationError:
-        return None, "the trace's challenge predates ADR 0025"
+        return None, "the trace's challenge predates ADR 0026"
 
 
 def load_cases(

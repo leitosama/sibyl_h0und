@@ -217,7 +217,7 @@ class ToolCatalog:
         Returns:
             OpenAI-compatible response format of a `Challenge`. A check's
             source is either a call of one of these tools, with its own
-            argument schema, or a fact already seen (ADR 0025).
+            argument schema, or a fact already seen (ADR 0026).
         """
         names = self._allowed(tools)
         key = ("challenge", names)
