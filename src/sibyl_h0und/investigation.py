@@ -312,11 +312,18 @@ class Investigation:
             return LocalAnswer(feedback)
         if (known := self._ledger_answer(tool, arguments)) is not None:
             return known
-        citations = citation_problems(arguments, self._ledger) if tool == FINISH_TOOL else []
-        if citations and not self._citations_refused:
+        if (
+            tool == FINISH_TOOL
+            and not self._citations_refused
+            and (citations := citation_problems(arguments, self._ledger))
+        ):
             # Refused once, like a placeholder: the ledger may miss how an entity is named.
             self._citations_refused = True
             message = f"Not sent to the runtime: {' '.join(citations)} Submit the report again."
+            if challenge:
+                # One refusal, not two in a row with different reasons.
+                self._benign_challenged = True
+                message = f"{message} {BENIGN_CHALLENGE}"
             feedback = {"status": "error", "message": message}
             logger.warning("Refused report citations once: {}", citations)
             self.trace.local_answer("citations_refused", tool, arguments, feedback)
@@ -453,7 +460,12 @@ class Investigation:
         decision = self._ledger.check(FINISH_TOOL, report)
         if decision.reason == "rejected" and decision.feedback is not None:
             return None, decision.feedback["message"].removeprefix("Not sent to the runtime: ")
-        if citations := citation_problems(report, self._ledger):
+        citations = citation_problems(report, self._ledger)
+        if self._citations_refused:
+            # The head was told once and kept these citations: they are its call.
+            kept = set(citation_problems(draft, self._ledger))
+            citations = [problem for problem in citations if problem not in kept]
+        if citations:
             return None, " ".join(citations)
         return report, None
 
@@ -619,17 +631,13 @@ def citation_problems(arguments: dict[str, Any], ledger: GraphLedger) -> list[st
     if report is None:
         return []
     problems: list[str] = []
-    kinds: dict[str, Any] = {}
+    kinds: dict[str, list[str]] = {}
     for item in _dicts(report.get("ir_artifacts")):
         entity_id, kind = item.get("entity_id"), item.get("kind")
         if not isinstance(entity_id, str):
             continue
-        if entity_id in kinds and kinds[entity_id] != kind:
-            problems.append(
-                f"ir_artifacts gives {entity_id!r} two kinds, `{kinds[entity_id]}` and "
-                f"`{kind}`: give each entity one consistent action."
-            )
-        kinds.setdefault(entity_id, kind)
+        if isinstance(kind, str) and kind not in kinds.setdefault(entity_id, []):
+            kinds[entity_id].append(kind)
         expected = KIND_ENTITY_TYPES.get(kind) if isinstance(kind, str) else None
         actual = ledger.entity_type(entity_id)
         if entity_id in ledger.relations:
@@ -639,8 +647,9 @@ def citation_problems(arguments: dict[str, Any], ledger: GraphLedger) -> list[st
             )
         elif not ledger.is_entity(entity_id):
             problem = (
-                f"ir_artifacts cites {entity_id!r} as `{kind}`, but the runtime returned it "
-                "only as a property value, not as an entity: cite the entity's own id."
+                f"ir_artifacts cites {entity_id!r} as `{kind}`, but it is no entity the runtime "
+                "returned, only a value seen in a response (such as a SID, an account name "
+                "or an AD object id): cite the entity's own id."
             )
         elif expected is not None and actual in CHECKED_ENTITY_TYPES and actual != expected:
             problem = f"`{kind}` acts on a {expected} entity, but {entity_id!r} is a {actual}."
@@ -649,17 +658,25 @@ def citation_problems(arguments: dict[str, Any], ledger: GraphLedger) -> list[st
         if expected is not None:
             known = ledger.entities_of_type(expected)
             problem += (
-                f" Known {expected} entities: {listing(known)}."
+                f" Known {expected} entities, cite only the one the action is taken on: "
+                f"{listing(known)}."
                 if known
                 else f" No {expected} entity is known yet."
             )
         problems.append(problem)
+    problems.extend(
+        f"ir_artifacts gives {entity_id!r} several kinds ({', '.join(cited)}): give each "
+        "entity one consistent action."
+        for entity_id, cited in kinds.items()
+        if len(cited) > 1
+    )
     for item in _dicts(report.get("legitimacy_evidence")):
         entity_id, relation_id = item.get("entity_id"), item.get("relation_id")
         if isinstance(entity_id, str) and not ledger.is_entity(entity_id):
             problems.append(
-                f"legitimacy_evidence anchors {entity_id!r} as an entity, but the runtime "
-                "returned it only as a property value: anchor the entity that holds it."
+                f"legitimacy_evidence anchors {entity_id!r} as an entity, but it is no entity "
+                "the runtime returned, only a value seen in a response: anchor the entity "
+                "that holds it."
             )
         if isinstance(relation_id, str) and relation_id not in ledger.relations:
             problems.append(

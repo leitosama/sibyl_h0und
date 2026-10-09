@@ -130,11 +130,12 @@ def artifacts(*cited: tuple[str, str]) -> dict[str, Any]:
 @pytest.mark.parametrize(
     ("cited", "hint"),
     [
-        ([("S-1-5-21-1004", "identity_to_rotate")], "only as a property value"),
-        ([("proc-1", "file_to_delete")], "Known windows_file entities: ['file-1']"),
-        ([("file-1", "file_to_delete"), ("file-1", "file_observed")], "two kinds"),
+        ([("S-1-5-21-1004", "identity_to_rotate")], "no entity the runtime returned"),
+        ([("proc-1", "file_to_delete")], "windows_file entities, cite only the one"),
+        ([("proc-1", "host_to_isolate")], "['host-1']"),
+        ([("file-1", "file_to_delete"), ("file-1", "file_observed")], "several kinds"),
     ],
-    ids=["sid-as-identity", "process-as-file", "two-kinds"],
+    ids=["sid-as-identity", "process-as-file", "process-as-host", "two-kinds"],
 )
 def test_an_artifact_that_is_no_entity_or_the_wrong_type_is_refused_once(
     cited: list[tuple[str, str]], hint: str
@@ -170,8 +171,9 @@ def test_entities_named_by_reference_and_unchecked_kinds_are_not_refused(
     assert to_reporter(decision) == artifacts(*cited)
 
 
-def test_a_legitimacy_anchor_on_a_property_value_is_refused_once() -> None:
-    """Benign evidence anchors the entity that holds a value, not the value itself."""
+def test_a_legitimacy_anchor_on_a_property_value_is_refused_and_challenged_in_one_answer() -> None:
+    """Benign evidence anchors the entity that holds a value, not the value itself; the
+    model gets one refusal with both reasons, not two in a row."""
     investigation = fetched_graph_investigation()
     anchor = {"anchor": "entity", "entity_id": "S-1-5-21-1004", "property_fields": ["user_sid"]}
     report = {"submission": {**BENIGN_REPORT, "legitimacy_evidence": [anchor]}}
@@ -181,8 +183,23 @@ def test_a_legitimacy_anchor_on_a_property_value_is_refused_once() -> None:
 
     assert isinstance(refused, LocalAnswer)
     assert "anchor the entity that holds it" in refused.feedback["message"]
-    assert isinstance(again, Review)
-    assert again.role == "challenger"
+    assert "one stage before" in refused.feedback["message"]
+    assert to_reporter(again) == report
+
+
+def test_a_citation_the_head_kept_after_its_refusal_does_not_fail_the_reporter() -> None:
+    """Told once, the head may know better than the ledger; the reporter's rewrite that
+    keeps the same citation is sent rather than repaired."""
+    investigation = fetched_graph_investigation()
+    draft = artifacts(("S-1-5-21-1004", "identity_to_rotate"))
+    investigation.before_call(FINISH_TOOL, draft)
+    reporter = investigation.before_call(FINISH_TOOL, draft)
+    assert isinstance(reporter, Review)
+    rewrite = {**draft["submission"], "reasoning": "The account ran the dropped script."}
+
+    sent = investigation.after_review(reporter, report_call(rewrite))
+
+    assert sent == Send({"submission": rewrite})
 
 
 BENIGN_REPORT = {
@@ -336,7 +353,7 @@ def test_the_reporters_report_is_sent_and_it_sees_the_draft_evidence_and_challen
                     ],
                 }
             ),
-            "property value",
+            "no entity the runtime returned",
         ),
         (report_call({**REPORT, "reasoning": "Short test"}), "reasoning"),
         (ToolCall.model_validate({"tool": "get_entity", "entity_id": "file-1"}), "must call"),

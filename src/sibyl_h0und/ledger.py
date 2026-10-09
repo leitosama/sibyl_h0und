@@ -18,9 +18,9 @@ RELATION_ID_KEYS = frozenset({"relation_id"})
 # Keys whose list holds entities or relations, as dicts with `id` or as bare ids.
 ENTITY_LIST_KEYS = frozenset({"trigger_entities", "entities", "entity_ids"})
 RELATION_LIST_KEYS = frozenset({"trigger_relations", "relations", "relation_ids"})
-# Keys whose string value names an entity that a response may mention without
-# returning the entity itself, like the host of a process.
-ENTITY_REFERENCE_KEYS = frozenset({"host_id"})
+# Keys whose string value names an entity, of this type, that a response may
+# mention without returning the entity itself, like the host of a process.
+ENTITY_REFERENCE_KEYS = {"host_id": "host"}
 # Arguments that never change what a call returns.
 IGNORED_ARGUMENTS = frozenset({"reasoning"})
 # Characters that end an id inside the alert's prose.
@@ -54,9 +54,10 @@ class GraphLedger:
     visited_relations: set[str] = field(default_factory=set)
     # Every string value the runtime returned: an id that appears anywhere is real.
     seen_values: set[str] = field(default_factory=set)
-    # Entity ids named only by reference, such as a process's `host_id`. A
-    # report may cite them, but they are not listed as unvisited.
-    entity_references: set[str] = field(default_factory=set)
+    # Entity ids named by reference, such as a process's `host_id`, with the
+    # type the key implies. A report may cite them, but they are not listed as
+    # unvisited.
+    entity_references: dict[str, str] = field(default_factory=dict)
     # Free text of the alert, where ids may appear inside prose.
     alert_text: list[str] = field(default_factory=list)
     # Property keys of every entity or relation fetched by its id.
@@ -203,15 +204,17 @@ class GraphLedger:
         return value in self.entities or value in self.entity_references
 
     def entity_type(self, entity_id: str) -> str | None:
-        """Return the `type` of an entity the runtime returned, or `None` when unknown."""
-        if entity_id not in self.entities:
-            return None
-        entity_type = self.objects.get(entity_id, {}).get("type")
-        return entity_type if isinstance(entity_type, str) else None
+        """Return the `type` of a known entity, or `None` when unknown."""
+        if entity_id in self.entities:
+            entity_type = self.objects.get(entity_id, {}).get("type")
+            if isinstance(entity_type, str):
+                return entity_type
+        return self.entity_references.get(entity_id)
 
     def entities_of_type(self, entity_type: str) -> list[str]:
         """Return the known entity ids of one type, sorted."""
-        return sorted(item for item in self.entities if self.entity_type(item) == entity_type)
+        known = self.entities | self.entity_references.keys()
+        return sorted(item for item in known if self.entity_type(item) == entity_type)
 
     def _in_alert_text(self, value: str) -> bool:
         """Tell whether the alert's prose names this id as a whole word."""
@@ -307,7 +310,7 @@ class GraphLedger:
                 _collect_keys(node, "", self.properties.setdefault(object_id, set()))
         for key, value in node.items():
             if key in ENTITY_REFERENCE_KEYS and isinstance(value, str):
-                self.entity_references.add(value)
+                self.entity_references[value] = ENTITY_REFERENCE_KEYS[key]
             if key in ENTITY_ID_KEYS or key in ENTITY_LIST_KEYS:
                 self._collect(value, "entity")
             elif key in RELATION_ID_KEYS or key in RELATION_LIST_KEYS:
