@@ -91,6 +91,7 @@ traces/
 | `report_refused` | `tool` | `arguments` отчёта-заглушки, отклонённого локально один раз за задачу (ADR 0018), и `feedback`: ответ модели |
 | `report_written` | `fallback`: почему ушёл черновик головы, или `null` | `draft`: черновик головы, `report`: отчёт репортёра, который ушёл в runtime (ADR 0023) |
 | `benign_challenged` | `tool`, `fallback`: почему вместо челленджера общий вопрос, или `null` | `arguments` отчёта с вердиктом `benign`, возвращённого модели на проверку один раз за задачу (ADR 0020, 0022), и `feedback`: ответ модели, с версией и проверками челленджера в `challenge` |
+| `answers_refused` | `tool`, `review`: оценка каждой проверки (`n`, `outcome`, `why`) | `arguments` benign-отчёта, возвращённого один раз, потому что ответы не закрыли проверки челленджа (ADR 0028), и `feedback`: ответ модели |
 | `tool_cached` | `tool` | `arguments` повторного вызова и `feedback`: прежний ответ из кэша GraphLedger |
 | `task_end` | `completion_reason`, `total_reward`, `quality_score`, `efficiency_score`, `tool_calls`, `steps_taken`, `agent_steps`, `runtime_calls`, `llm_calls`, `llm_tokens`, `llm_ms`, `error` | `task_result` |
 
@@ -187,6 +188,8 @@ uv run python scripts/replay_knowledge.py --compare before # что измени
 агент (вызовы runtime, отказы, режим «только отчёт»), до отчёта, который
 попадает в выбранный побочный ход, и запускает только его с LLM из `.env`:
 `--role challenger` (по умолчанию) — первый benign-отчёт (ADR 0022),
+`--role answer_review` — benign-отчёт с ответами на челлендж (ADR 0028),
+запускается только проверка ответов, без репортёра,
 `--role reporter` — отчёт, который ушёл в runtime (ADR 0023); челлендж по
 дороге берётся из трейса. Runtime не нужен; трейсы читаются на месте и
 никуда не копируются.
@@ -196,6 +199,7 @@ uv run python scripts/replay_side_turn.py                          # челле�
 uv run python scripts/replay_side_turn.py --wrong-only --run 20261008
 uv run python scripts/replay_side_turn.py --split holdout --out /tmp/holdout.jsonl
 uv run python scripts/replay_side_turn.py --role reporter          # ссылки черновика и репортёра
+uv run python scripts/replay_side_turn.py --role answer_review --split all --run 5944616a
 ```
 
 Задачи делятся на `dev` и `holdout` по хешу id задачи; на `practice` id

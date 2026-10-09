@@ -44,7 +44,10 @@ def test_only_a_set_challenger_model_replaces_the_default_one(monkeypatch) -> No
     assert cli.role_models(Settings(_env_file=env_example)) == {}
 
     monkeypatch.setenv("LLM_CHALLENGER_MODEL", "provider/challenger")
-    assert cli.role_models(Settings(_env_file=env_example)) == {"challenger": "provider/challenger"}
+    assert cli.role_models(Settings(_env_file=env_example)) == {
+        "challenger": "provider/challenger",
+        "answer_review": "provider/challenger",
+    }
 
 
 def test_missing_configuration_is_reported_without_traceback(monkeypatch, capsys):

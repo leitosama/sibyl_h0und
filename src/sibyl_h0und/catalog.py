@@ -18,9 +18,11 @@ from loguru import logger
 
 from sibyl_h0und.models import (
     PRACTICE_ARGUMENT_MODELS,
+    AnswerReview,
     CallSource,
     Challenge,
     ChallengeCheck,
+    CheckOutcome,
     SeenSource,
     StepEnvelope,
     normalize_time_windows,
@@ -30,6 +32,7 @@ FINISH_TOOL = "finish_investigation"
 RESPONSE_FORMAT_NAME = "bluesec1_next_step"
 CHALLENGE_FORMAT_NAME = "bluesec1_challenge"
 REPORT_FORMAT_NAME = "bluesec1_report"
+ANSWER_REVIEW_FORMAT_NAME = "bluesec1_answer_review"
 # Keys under which a catalog entry may carry the JSON Schema of its arguments.
 ARGUMENT_SCHEMA_KEYS = (
     "parameters",
@@ -241,6 +244,18 @@ class ToolCatalog:
             schema.pop("$defs", None)
             schema["properties"]["checks"]["items"] = check
             self._formats[key] = _format(CHALLENGE_FORMAT_NAME, schema, definitions, strict)
+        return self._formats[key]
+
+    def answer_review_format(self) -> dict[str, Any]:
+        """Build the strict response format of the review of challenge answers (ADR 0028)."""
+        key = ("answer_review", frozenset[str]())
+        if key not in self._formats:
+            check = CheckOutcome.model_json_schema()
+            _strict_object(check)
+            schema = AnswerReview.model_json_schema()
+            schema.pop("$defs", None)
+            schema["properties"]["checks"]["items"] = check
+            self._formats[key] = _format(ANSWER_REVIEW_FORMAT_NAME, schema, {}, True)
         return self._formats[key]
 
     def report_format(self) -> dict[str, Any] | None:

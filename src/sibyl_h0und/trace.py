@@ -151,8 +151,8 @@ class TaskTrace:
 
         Args:
             kind: `tool_rejected`, `tool_invalid`, `report_refused`, `citations_refused`,
-                `benign_challenged`, `tool_cached` or `tool_knowledge` (the lookup
-                and its answer).
+                `benign_challenged`, `answers_refused`, `tool_cached` or
+                `tool_knowledge` (the lookup and its answer).
             tool: Tool the model asked for.
             arguments: Arguments of the call.
             feedback: Answer shown to the model, if it is worth keeping.
@@ -299,7 +299,7 @@ class RecordedDraft:
 
 
 # Local answers to a report: the report never reached the runtime.
-REPORT_ANSWERS = ("report_refused", "citations_refused", "benign_challenged")
+REPORT_ANSWERS = ("report_refused", "citations_refused", "benign_challenged", "answers_refused")
 
 
 @dataclass

@@ -2,12 +2,14 @@
 
 The agent loop asks `before_call` what to do with the model's call and gives
 the runtime's answer to `after_call`. When the call needs a side turn of the
-LLM first (the benign challenger, ADR 0022), the loop runs it and gives its
-reply to `after_review`. The tool catalog, GraphLedger, the `still_open`
-merge, the local knowledge lookup, the side turns' requests, the wording of
-local answers and the trace events of those decisions all live here.
+LLM first (the benign challenger, ADR 0022, and the review of the answers to
+it, ADR 0028), the loop runs it and gives its reply to `after_review`. The
+tool catalog, GraphLedger, the `still_open` merge, the local knowledge lookup,
+the side turns' requests, the wording of local answers and the trace events of
+those decisions all live here.
 """
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,7 +20,7 @@ from sibyl_h0und.catalog import FINISH_TOOL, ToolCatalog
 from sibyl_h0und.digest import evidence_digest
 from sibyl_h0und.ledger import GraphLedger, listing
 from sibyl_h0und.llm import render_json
-from sibyl_h0und.models import Challenge, SeenSource, ToolCall
+from sibyl_h0und.models import AnswerReview, Challenge, CheckOutcome, SeenSource, ToolCall
 from sibyl_h0und.outcome import ToolOutcome, decode_json
 from sibyl_h0und.trace import TaskTrace
 from sibyl_h0und.vocabulary import KNOWLEDGE_TOOL, KNOWLEDGE_TOOL_SPEC, shared
@@ -68,6 +70,7 @@ Your job is to argue the opposite verdict.
 - Write the strongest attack hypothesis these facts allow: which stages of an intrusion the
   evidence could be, which entities would carry them out, and why the detection would fire.
   Build it only from facts in the evidence; do not invent entities or properties.
+- Name the MITRE ATT&CK techniques of the hypothesis by id in `techniques`.
 - Then give one to three checks. Each check names the one fact that decides between the
   attack and an innocent reading (`look_for`), what that fact shows if it is the attack
   (`confirms_if`) and what it shows if it is not (`refuted_if`). Pick facts about what an
@@ -136,6 +139,42 @@ what no host reaches.
 
 Return exactly one JSON object matching the supplied schema, with no prose.
 """.strip()
+ANSWER_REVIEW_ROLE = "answer_review"
+# Reviews the head's answers to the challenger's checks before a benign report
+# is written (ADR 0028). Neutral: it judges answers, it argues no verdict.
+ANSWER_REVIEW_PROMPT = """
+You check an investigation's answers to a reviewer's challenge before its benign report
+closes the case. You see the alert, the evidence the investigation gathered, the reviewer's
+attack hypothesis with numbered checks, and the investigation's answers and reasoning.
+
+For each check, decide how the answer stands:
+- refuted: the answer reports the observed value of the fact the check names (`look_for`),
+  the evidence holds that value, and it meets `refuted_if`.
+- confirmed: the observed value meets `confirms_if`.
+- not_shown: the answer does not report the value of that fact. That includes an answer
+  that gives a different fact; an empty, null or missing value; the absence of a flag or a
+  match; what an entity is (its name, signature, path, usual parent or a plausible purpose)
+  instead of what it did, to what, from where and when; an answer the evidence
+  contradicts; and `cannot check`.
+- An answer that something is absent ("no X", "none", "only Y") shows it only when the
+  relations that could hold X were opened. If the entity still lists such relations in
+  `unvisited_relation_ids`, or `still_open` counts them as not visited, the absence is
+  not shown.
+
+Judge only the answers against the evidence. Do not argue for either verdict and do not
+ask for facts the check does not name. Return one entry per check, in order, as exactly one
+JSON object matching the supplied schema, with no prose.
+""".strip()
+# What the head is told once when its answers do not settle the checks (ADR 0028).
+ANSWERS_REFUSED = (
+    "Not sent to the runtime: your answers do not settle these checks of the challenge: "
+    "{items} A check is settled only by the observed value of the fact it names; an absent "
+    "value, or what an entity is called or signed by, does not settle it. Make the calls you "
+    "need, answer these checks again in the `current_state` of the step that submits the "
+    "report, and submit it malicious or benign as the evidence says."
+)
+# Technique ids a challenge may name, looked up in the vocabulary (ADR 0028).
+TECHNIQUE_ID = re.compile(r"\bT\d{4}(?:\.\d{3})?\b", re.IGNORECASE)
 # What the reporter is told when its report cannot be sent.
 REPORT_REPAIR = (
     "This report cannot be sent: {problem} Return the corrected report as one JSON object "
@@ -248,7 +287,11 @@ class Investigation:
         # The head's answers to its checks, from the state of its report the reporter gets.
         self._challenge_answers: str | None = None
         # The challenger's case before its repair turn, kept if the repair gives nothing.
-        self._unrepaired: tuple[str, list[dict[str, Any]]] = ("", [])
+        self._unrepaired: tuple[str, list[dict[str, Any]], list[str]] = ("", [], [])
+        # Whether the head's answers to the challenge were reviewed (ADR 0028).
+        self._answers_reviewed = False
+        # Whether the answers were refused and the next report's state replaces them.
+        self._answers_stale = False
         # Whether the report last sent is the reporter's rewrite of the head's.
         self._rewritten = False
         # Why the last report sent is the head's own, or `None` (ADR 0023).
@@ -376,14 +419,32 @@ class Investigation:
                 self.catalog.challenge_format(tools),
                 Challenge,
             )
-        if tool == FINISH_TOOL and (report_format := self.catalog.report_format()) is not None:
-            if self._challenge_record is not None and state and self._challenge_answers is None:
-                # The first report after the challenge that is not refused answers it.
-                self._challenge_answers = state
-            logger.info("Asking the reporter to write the report.")
-            return Review(
-                REPORTER_ROLE, arguments, self._reporter_request(arguments), report_format, ToolCall
-            )
+        if tool == FINISH_TOOL and self.catalog.report_format() is not None:
+            if (
+                self._challenge_record is not None
+                and state
+                and (self._challenge_answers is None or self._answers_stale)
+            ):
+                # The first report after the challenge, or after the answers' refusal, answers it.
+                self._challenge_answers, self._answers_stale = state, False
+            if (
+                self._challenge_record is not None
+                and self._challenge_answers
+                and not self._answers_reviewed
+                and not finish_only
+                and report_verdict(arguments) == "benign"
+            ):
+                # Once: the head may still be right, and its next report goes as it is.
+                self._answers_reviewed = True
+                logger.info("Asking for a review of the answers to the challenge.")
+                return Review(
+                    ANSWER_REVIEW_ROLE,
+                    arguments,
+                    self._answer_review_request(arguments),
+                    self.catalog.answer_review_format(),
+                    AnswerReview,
+                )
+            return self._reporter_review(arguments)
         return Send(arguments)
 
     def after_review(
@@ -402,11 +463,15 @@ class Investigation:
         """
         if review.role == REPORTER_ROLE:
             return self._report(review, reply if isinstance(reply, ToolCall) else None, error)
+        if review.role == ANSWER_REVIEW_ROLE:
+            return self._reviewed_answers(
+                review.arguments, reply if isinstance(reply, AnswerReview) else None, error
+            )
         challenge = reply if isinstance(reply, Challenge) else None
         checks, problems = self._screen_checks(challenge) if challenge is not None else ([], [])
         if challenge is not None and problems and not review.repaired:
             logger.warning("Challenger checks need a repair ({}); asking once more.", problems)
-            self._unrepaired = (challenge.hypothesis, checks)
+            self._unrepaired = (challenge.hypothesis, checks, challenge.techniques)
             messages = [
                 *review.messages,
                 {"role": "assistant", "content": render_json(challenge.model_dump())},
@@ -421,10 +486,84 @@ class Investigation:
                 repaired=True,
             )
         hypothesis = challenge.hypothesis if challenge is not None else ""
+        techniques = challenge.techniques if challenge is not None else []
         if review.repaired and not checks and self._unrepaired[1]:
             # A failed repair does not cost the checks the first reply got right.
-            hypothesis, checks = self._unrepaired
-        return self._challenge(review.arguments, hypothesis, checks, error)
+            hypothesis, checks, techniques = self._unrepaired
+        return self._challenge(review.arguments, hypothesis, checks, error, techniques)
+
+    def _reporter_review(self, arguments: dict[str, Any]) -> Review:
+        """Ask the reporter to write the report that is to be sent (ADR 0023)."""
+        report_format = self.catalog.report_format()
+        assert report_format is not None
+        logger.info("Asking the reporter to write the report.")
+        return Review(
+            REPORTER_ROLE, arguments, self._reporter_request(arguments), report_format, ToolCall
+        )
+
+    def _answer_review_request(self, draft: dict[str, Any]) -> list[dict[str, Any]]:
+        """Build the answer review's request: the evidence, the challenge and the answers."""
+        report = find_report(draft) or {}
+        request: dict[str, Any] = {
+            "alert": self.alert,
+            "evidence": evidence_digest(self._ledger),
+            "challenge": self._challenge_record,
+            "answers": self._challenge_answers,
+            "report_reasoning": report.get("reasoning"),
+        }
+        if open_items := self._ledger.summary():
+            request["still_open"] = open_items
+        return [
+            {"role": "system", "content": ANSWER_REVIEW_PROMPT},
+            {"role": "user", "content": render_json(request)},
+        ]
+
+    def _reviewed_answers(
+        self, arguments: dict[str, Any], review: AnswerReview | None, error: str | None
+    ) -> LocalAnswer | Review:
+        """Refuse a benign report once if its answers leave checks unsettled, else write it.
+
+        A failed review never holds the report back (ADR 0009).
+
+        Args:
+            arguments: The benign report.
+            review: The review's reply, or `None` when it failed.
+            error: Why the review failed, if it did.
+
+        Returns:
+            The refusal with the unsettled checks, or the reporter's turn.
+        """
+        record = self._challenge_record or {}
+        looked_for = {check["n"]: check["look_for"] for check in record.get("checks", [])}
+        if review is None:
+            logger.warning("The answer review failed ({}); writing the report.", error)
+            return self._reporter_review(arguments)
+        rated = {item.n: item for item in review.checks if item.n in looked_for}
+        unsettled = [
+            rated.get(n)
+            or CheckOutcome(n=n, outcome="not_shown", why="The review did not rate this answer.")
+            for n in looked_for
+        ]
+        unsettled = [item for item in unsettled if item.outcome != "refuted"]
+        if not unsettled:
+            return self._reporter_review(arguments)
+        # The next report's answers replace these; until then the reporter keeps them.
+        self._answers_stale = True
+        items = " ".join(
+            f"{item.n}. {looked_for[item.n]} ({item.outcome}: {item.why})" for item in unsettled
+        )
+        feedback: dict[str, Any] = {
+            "status": "error",
+            "message": ANSWERS_REFUSED.format(items=items),
+        }
+        if open_items := self._ledger.summary():
+            feedback["still_open"] = open_items
+        logger.warning("Refused a benign report once: {} checks unsettled.", len(unsettled))
+        reviewed = [item.model_dump() for item in review.checks]
+        self.trace.local_answer(
+            "answers_refused", FINISH_TOOL, arguments, feedback, review=reviewed
+        )
+        return LocalAnswer(feedback)
 
     def _reporter_request(self, draft: dict[str, Any]) -> list[dict[str, Any]]:
         """Build the reporter's request: the alert, the evidence, the draft and any challenge."""
@@ -549,17 +688,20 @@ class Investigation:
         hypothesis: str,
         checks: list[dict[str, Any]],
         error: str | None,
+        techniques: list[str] | None = None,
     ) -> LocalAnswer:
         """Return a benign report to the model with the challenger's case.
 
         Without a usable check, the model gets the general question of
-        ADR 0020 instead.
+        ADR 0020 instead. The vocabulary's entries for the techniques the
+        challenger named come with its case: a local lookup (ADR 0017, 0028).
 
         Args:
             arguments: The benign report.
             hypothesis: The challenger's hypothesis.
             checks: The challenger's usable checks, numbered.
             error: Why the challenger failed, if it did.
+            techniques: ATT&CK technique ids the challenger named.
 
         Returns:
             The local answer to the report.
@@ -567,6 +709,8 @@ class Investigation:
         fallback = error
         if checks:
             self._challenge_record = {"hypothesis": hypothesis, "checks": checks}
+            if knowledge := self._technique_entries(techniques or []):
+                self._challenge_record["knowledge"] = knowledge
             feedback: dict[str, Any] = {
                 "status": "error",
                 "message": f"Not sent to the runtime: {CHALLENGE_ANSWER}",
@@ -586,6 +730,14 @@ class Investigation:
             "benign_challenged", FINISH_TOOL, arguments, feedback, fallback=fallback
         )
         return LocalAnswer(feedback)
+
+    def _technique_entries(self, techniques: list[str]) -> list[dict[str, Any]]:
+        """Look up the challenger's technique ids in the vocabulary, as the sources state them."""
+        found = (match.upper() for item in techniques for match in TECHNIQUE_ID.findall(item))
+        ids = list(dict.fromkeys(found))
+        if not ids:
+            return []
+        return self._vocabulary.lookup(ids[0], ids[1:]).get("matches", [])
 
     def _screen_checks(self, challenge: Challenge) -> tuple[list[dict[str, Any]], list[str]]:
         """Keep the checks the model could answer, numbered, and say what is wrong with the rest.
