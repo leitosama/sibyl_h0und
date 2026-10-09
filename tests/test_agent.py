@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
 from bluesec1_client import (
     PublicTask,
     RemoteBenchmarkClient,
@@ -14,7 +16,9 @@ from bluesec1_client import (
 )
 from sibyl_h0und.agent import SYSTEM_PROMPT, SimpleSGRAgent
 from sibyl_h0und.catalog import FINISH_TOOL
-from sibyl_h0und.models import PRACTICE_ARGUMENT_MODELS, NextStep
+from sibyl_h0und.challenge_replay import challenge, load_cases
+from sibyl_h0und.llm import NextStepRequestError
+from sibyl_h0und.models import PRACTICE_ARGUMENT_MODELS, Challenge, NextStep
 from sibyl_h0und.replay import load_tasks
 from sibyl_h0und.trace import TaskTrace
 from sibyl_h0und.vocabulary import KNOWLEDGE_TOOL
@@ -31,14 +35,18 @@ TOOL_CATALOG = json.dumps(
 class FakeStepClient:
     """Deterministic structured steps used by the agent unit test."""
 
-    def __init__(self, steps: list[NextStep]) -> None:
-        """Store steps in their expected request order.
+    def __init__(self, steps: list[NextStep], challenges: tuple[Challenge, ...] = ()) -> None:
+        """Store steps and challenger replies in their expected request order.
 
         Args:
             steps: Prepared LLM steps.
+            challenges: Prepared challenger replies; with none left, the
+                challenger fails as a provider would.
         """
         self.steps = list(steps)
+        self.challenges = list(challenges)
         self.requests: list[list[dict[str, Any]]] = []
+        self.side_requests: list[list[dict[str, Any]]] = []
         self.formats: list[dict[str, Any]] = []
 
     async def next_step(
@@ -61,6 +69,25 @@ class FakeStepClient:
         self.requests.append([dict(message) for message in messages])
         self.formats.append(response_format)
         return self.steps.pop(0)
+
+    async def structured(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        response_format: dict[str, Any],
+        model: type[Any],
+        role: str,
+        trace: TaskTrace | None = None,
+    ) -> Any:
+        """Record one side-turn request and return the next prepared challenger reply.
+
+        Raises:
+            NextStepRequestError: When no reply is prepared.
+        """
+        self.side_requests.append([dict(message) for message in messages])
+        if not self.challenges:
+            raise NextStepRequestError("No valid reply.")
+        return self.challenges.pop(0)
 
 
 class FakeSession:
@@ -403,3 +430,100 @@ def test_system_prompt_leaves_tools_to_the_catalog_and_reward_out() -> None:
 
     assert [tool for tool in runtime_tools if re.search(rf"\b{tool}\b", SYSTEM_PROMPT)] == []
     assert "reward" not in SYSTEM_PROMPT.lower()
+
+
+CHALLENGE = Challenge.model_validate(
+    {
+        "hypothesis": "entity-1 is a payload started by a remote session.",
+        "checks": [
+            {
+                "refuted_if": "A local interactive logon started it.",
+                "call": {"tool": "get_entity", "entity_id": "entity-1", "reasoning": "Parent."},
+            }
+        ],
+    }
+)
+
+
+def challenged_run(
+    tmp_path: Path, steps: list[NextStep] | None = None, max_runtime_calls: int = 95
+) -> tuple[FakeStepClient, FakeSession]:
+    """Run a task; by default its benign report is challenged and then turned malicious."""
+    llm = FakeStepClient(
+        steps
+        or [
+            get_entity_step("entity-1"),
+            benign_finish_step("entity-1", "pid"),
+            make_step("finish_investigation", submission=MALICIOUS_SUBMISSION),
+        ],
+        [CHALLENGE],
+    )
+    session = FakeSession()
+    agent = SimpleSGRAgent(llm, max_runtime_calls=max_runtime_calls, trace_dir=tmp_path / "traces")
+    asyncio.run(agent.run(cast(RemoteBenchmarkClient, FakeClient(session))))
+    return llm, session
+
+
+def test_a_benign_report_is_challenged_from_the_evidence_and_costs_no_runtime_call(
+    tmp_path: Path,
+) -> None:
+    """The challenger reads the evidence, not the report; the head gets its case and its
+    next report is sent."""
+    llm, session = challenged_run(tmp_path)
+
+    assert [name for name, _ in session.calls] == ["get_entity", "finish_investigation"]
+    assert session.calls[1][1] == {"submission": MALICIOUS_SUBMISSION}
+    (side,) = llm.side_requests
+    assert "Signed vendor binary" not in json.dumps(side)
+    assert '"pid": 42' in side[-1]["content"]
+    answer = json.loads(llm.requests[2][-1]["content"])
+    assert answer["challenge"]["hypothesis"] == CHALLENGE.hypothesis
+
+
+def test_the_harness_rebuilds_the_challenger_turn_from_a_trace_the_agent_wrote(
+    tmp_path: Path,
+) -> None:
+    """Cut at the first benign report, a saved task asks the challenger what the live
+    agent asked it, and gets the same answer."""
+    llm, _ = challenged_run(tmp_path)
+
+    (case,) = load_cases(tmp_path / "traces")
+    replay_llm = FakeStepClient([], [CHALLENGE])
+    answer = asyncio.run(challenge(case, replay_llm))
+
+    assert replay_llm.side_requests == llm.side_requests
+    assert answer.feedback == json.loads(llm.requests[2][-1]["content"])
+    assert case.final_verdict == "malicious"
+    assert case.split in {"dev", "holdout"}
+
+
+@pytest.mark.parametrize(
+    ("steps", "max_runtime_calls"),
+    [
+        (
+            [
+                make_step(
+                    "finish_investigation",
+                    submission={
+                        **benign_finish_step("entity-1", "pid").function.arguments["submission"],
+                        "reasoning": "",
+                    },
+                ),
+                benign_finish_step("entity-1", "pid"),
+            ],
+            95,
+        ),
+        ([get_entity_step("entity-1"), benign_finish_step("entity-1", "pid")], 2),
+    ],
+    ids=["after-a-refused-placeholder", "at-the-ceiling"],
+)
+def test_the_harness_skips_a_benign_report_the_live_agent_never_challenged(
+    tmp_path: Path, steps: list[NextStep], max_runtime_calls: int
+) -> None:
+    """A benign report sent as is, after the one refusal or when only the report remained,
+    is no challenger case."""
+    llm, session = challenged_run(tmp_path, steps, max_runtime_calls)
+
+    assert llm.side_requests == []
+    assert session.calls[-1][0] == FINISH_TOOL
+    assert list(load_cases(tmp_path / "traces")) == []

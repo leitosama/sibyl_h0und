@@ -83,12 +83,12 @@ traces/
 | `kind` | Плоские поля | `payload` |
 | --- | --- | --- |
 | `task_start` | — | `run`: настройки run'а без секретов (модель, лимиты, арена); `task`: задача целиком, включая `observation` и `available_tools` |
-| `llm_call` | `attempt`, `tokens` | `prefix`, `messages`: новые сообщения запроса (см. ниже), `raw_content` (ответ модели как есть) |
+| `llm_call` | `role` (`head` или `challenger`), `attempt`, `tokens` | `prefix`, `messages`: новые сообщения запроса (см. ниже), `raw_content` (ответ модели как есть) |
 | `step` | `tool` | `step`: разобранный `NextStep` |
 | `tool_call` | `tool`, `status`, `reward`, `terminated`, `truncated` или `error` | `arguments`, `response`: полный `ToolCallResult` от runtime |
 | `tool_rejected` | `tool` | `arguments` вызова, отклонённого локально (инструмента нет в каталоге или GraphLedger не знает id), `feedback`: ответ модели |
 | `report_refused` | `tool` | `arguments` отчёта-заглушки, отклонённого локально один раз за задачу (ADR 0018), и `feedback`: ответ модели |
-| `benign_challenged` | `tool` | `arguments` отчёта с вердиктом `benign`, возвращённого модели на проверку один раз за задачу (ADR 0020), и `feedback`: вопрос модели |
+| `benign_challenged` | `tool`, `fallback`: почему вместо челленджера общий вопрос, или `null` | `arguments` отчёта с вердиктом `benign`, возвращённого модели на проверку один раз за задачу (ADR 0020, 0022), и `feedback`: ответ модели, с версией и проверками челленджера в `challenge` |
 | `tool_cached` | `tool` | `arguments` повторного вызова и `feedback`: прежний ответ из кэша GraphLedger |
 | `task_end` | `completion_reason`, `total_reward`, `quality_score`, `efficiency_score`, `tool_calls`, `steps_taken`, `agent_steps`, `runtime_calls`, `llm_calls`, `llm_tokens`, `llm_ms`, `error` | `task_result` |
 
@@ -102,7 +102,8 @@ traces/
 копии раздували трейс квадратично. `prefix` — сколько первых сообщений
 запрос делит с предыдущим `llm_call` той же задачи, `messages` — сообщения
 после них. Полный запрос шага N — это первые `prefix` сообщений запроса
-N−1 плюс `messages`. Префикс может быть короче предыдущего запроса: после
+N−1 той же роли (`role`) плюс `messages`: у хода челленджера своя цепочка,
+и история головы после него не переписывается заново. Префикс может быть короче предыдущего запроса: после
 ремонта следующий шаг идёт без неудачного ответа и инструкции ремонта.
 Собирает полные запросы `sibyl_h0und.trace.llm_requests(events)`; в старых
 трейсах `prefix` нет, и `messages` там — полный запрос.
@@ -177,6 +178,27 @@ uv run python scripts/replay_knowledge.py --compare before # что измени
 повлияла ли запись на вердикт, видно только на `practice` (ADR 0017).
 Источник Nextron отвечает на любой путь, поэтому его строка почти всегда
 полная.
+
+### Стенд челленджера
+
+`scripts/replay_challenger.py` режет каждый трейс на первом benign-отчёте,
+восстанавливает расследование из вызовов runtime до него и запускает только
+челленджер (ADR 0022) с LLM из `.env`. Runtime не нужен; трейсы читаются на
+месте и никуда не копируются.
+
+```bash
+uv run python scripts/replay_challenger.py                          # dev-половина
+uv run python scripts/replay_challenger.py --wrong-only --run 20261008
+uv run python scripts/replay_challenger.py --split holdout --out /tmp/holdout.jsonl
+```
+
+Задачи делятся на `dev` и `holdout` по хешу id задачи; на `practice` id
+повторяются, так что задача всегда в одной половине. Над промптом работаем
+только по `dev`; `holdout` — одна проверка «прошёл / не прошёл», а не цикл
+подстройки. Неверной считаем задачу, которая кончилась `benign` с
+`quality_score` ниже `--wrong-below`. На неверных смотрим, указывает ли
+проверка на ту часть графа, где была атака; на верных — что проверки дешёвые
+и опровержимые, а версия не противоречит уликам.
 
 ### Пакеты знаний
 

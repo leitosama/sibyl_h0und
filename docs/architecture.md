@@ -28,12 +28,14 @@ proto/                         gRPC-схема runtime (от организат�
 scripts/generate_remote_proto.py  перегенерация src/bluesec1_client/proto/
 scripts/build_*_pack.py        сборка пакетов знаний из upstream-источников
 scripts/replay_knowledge.py    какие источники знают сущности из сохранённых трейсов
+scripts/replay_challenger.py   офлайн-стенд челленджера по сохранённым трейсам
 src/bluesec1_client/           клиент runtime — копия от организаторов, НЕ ПРАВИМ
 src/sibyl_h0und/
   cli.py                       точка входа h0und: настройки, run, печать итогов
   settings.py                  настройки из окружения / .env
   agent.py                     SimpleSGRAgent: цикл «одно действие за ход», SYSTEM_PROMPT
-  investigation.py             Investigation: before_call / after_call одной задачи (ADR 0016)
+  investigation.py             Investigation: before_call / after_call / after_review одной задачи (ADR 0016), промпт челленджера
+  digest.py                    дайджест улик из GraphLedger для побочных ходов (ADR 0022)
   outcome.py                   ToolOutcome: ответ runtime, разобранный один раз
   llm.py                       клиент OpenAI-совместимого API со structured output
   catalog.py                   ToolCatalog: каталог задачи и строгая схема шага из него
@@ -46,6 +48,7 @@ src/sibyl_h0und/
   knowledge/                   пакеты знаний: JSON-снимки внешних источников и NOTICE
   trace.py                     JSONL-трейсы вне репозитория: запись и чтение событий
   replay.py                    офлайн-покрытие словаря по сохранённым трейсам
+  challenge_replay.py          офлайн-стенд челленджера: трейс до первого benign, только челленджер
 tests/                         тесты без сети
 ```
 
@@ -54,7 +57,10 @@ tests/                         тесты без сети
 из `available_tools` задачи. `Investigation.before_call` проверяет вызов по каталогу задачи и в
 GraphLedger, в runtime уходит только то, что нельзя ответить локально, а
 `after_call` собирает ответ для модели: `last_tool_result` вместе с
-`still_open`. Вызов `lookup_knowledge` отвечает локально из пакетов знаний. Задача заканчивается, когда `finish_investigation`
+`still_open`. Вызов `lookup_knowledge` отвечает локально из пакетов знаний.
+Первый benign-отчёт `before_call` превращает в `Review`: цикл агента
+выполняет побочный ход челленджера, а `after_review` собирает из его ответа
+локальный ответ модели. Задача заканчивается, когда `finish_investigation`
 возвращает `task_result`.
 
 ## Правила
@@ -74,6 +80,7 @@ GraphLedger, в runtime уходит только то, что нельзя от
 | Знания — закоммиченные JSON-снимки, агент и CI в сеть не ходят | [0012](adr/0012-knowledge-packs.md) |
 | В отчёт попадает только то, что относится к инциденту | [0013](adr/0013-minimal-report.md) |
 | Алерт считаем атакой, пока улики не докажут обратное; benign-вердикт перед отправкой один раз возвращается модели на проверку | [0020](adr/0020-alert-presumed-malicious.md) |
+| Первый benign оспаривает челленджер: отдельный вызов LLM на дайджесте улик, без рассуждений головы; при сбое — общий вопрос | [0022](adr/0022-benign-challenger.md) |
 
 ## Гипотезы
 
@@ -121,7 +128,8 @@ Flash, OpenRouter для экспериментов.
   Состав ролей будет меняться по результатам практики.
 - Первые две роли проектируем как шлюз отчёта: челленджер (гипотезёр) на
   benign-вердикт и репортёр (IR-аналитик) на каждый отчёт, оба на дайджесте
-  улик из GraphLedger, см. [finish-gate.md](finish-gate.md).
+  улик из GraphLedger, см. [finish-gate.md](finish-gate.md). Челленджер
+  принят ([0022](adr/0022-benign-challenger.md)), репортёр — гипотеза.
 
 ### Знания и детекторы
 

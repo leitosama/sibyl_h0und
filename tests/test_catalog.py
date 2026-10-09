@@ -2,6 +2,7 @@ import json
 from typing import Any
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from sibyl_h0und.catalog import ToolCatalog
 
@@ -173,6 +174,28 @@ def test_step_schema_can_allow_only_the_report() -> None:
     assert set(branches(catalog.response_format(["finish_investigation"]))) == {
         "finish_investigation"
     }
+
+
+def test_challenge_schema_accepts_one_to_three_checks_of_the_given_tools() -> None:
+    """The challenger's schema matches its model and lets checks call only the tools it is
+    given, with their own arguments."""
+    catalog = catalog_of(
+        {"name": "lookup_host", "parameters": LOOKUP_PARAMETERS},
+        {"name": "finish_investigation", "parameters": FINISH_PARAMETERS},
+    )
+    response_format = catalog.challenge_format(["lookup_host"])
+    validator = Draft202012Validator(schema_of(response_format))
+    check = {
+        "refuted_if": "No logon.",
+        "call": {"tool": "lookup_host", "host_id": "h", "page": None},
+    }
+    report = {"tool": "finish_investigation", "submission": {"verdict": "benign", "reasoning": "x"}}
+
+    assert response_format["json_schema"]["strict"] is True
+    assert validator.is_valid({"hypothesis": "Lateral movement.", "checks": [check]})
+    assert not validator.is_valid({"hypothesis": "x", "checks": []})
+    assert not validator.is_valid({"hypothesis": "x", "checks": [check] * 4})
+    assert not validator.is_valid({"hypothesis": "x", "checks": [{**check, "call": report}]})
 
 
 def test_catalog_without_finish_investigation_is_rejected() -> None:

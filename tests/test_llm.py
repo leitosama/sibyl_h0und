@@ -19,7 +19,7 @@ from sibyl_h0und.llm import (
     OpenAIStructuredStepClient,
     parse_next_step_payload,
 )
-from sibyl_h0und.models import NextStep
+from sibyl_h0und.models import Challenge, NextStep
 from sibyl_h0und.trace import TaskTrace, llm_requests
 
 
@@ -233,3 +233,47 @@ def test_structured_client_retries_only_transient_provider_errors(
     assert len(fake_openai.completions.requests) == requests
     events = [json.loads(line) for line in trace.path.read_text(encoding="utf-8").splitlines()]
     assert [event["kind"] for event in events].count("llm_error") == min(len(errors), requests)
+
+
+def test_a_side_turn_sends_only_its_own_request_and_is_traced_by_role(tmp_path: Path) -> None:
+    """A challenger turn between two head steps gets no step instructions, repairs against
+    its own schema, and leaves events that name its role and rebuild every request."""
+    step = valid_process_step().model_dump_json()
+    reply = json.dumps(
+        {
+            "hypothesis": "Dropped payload.",
+            "checks": [{"refuted_if": "No writer.", "call": {"tool": "get_entity"}}],
+        }
+    )
+    fake_openai = FakeOpenAI([step, "not-json", reply, step])
+    client = OpenAIStructuredStepClient(
+        base_url="https://llm.example/v1",
+        api_key="secret",
+        model="test-model",
+        timeout_seconds=10.0,
+        max_completion_tokens=1000,
+        max_retries=3,
+        client=cast(AsyncOpenAI, fake_openai),
+    )
+    trace = TaskTrace(tmp_path / "task.trace.jsonl")
+    history = [{"role": "system", "content": "Investigate."}]
+    side = [{"role": "system", "content": "Argue."}, {"role": "user", "content": "{}"}]
+
+    asyncio.run(client.next_step(history, response_format=STEP_FORMAT, trace=trace))
+    challenge = asyncio.run(
+        client.structured(
+            side, response_format=STEP_FORMAT, model=Challenge, role="challenger", trace=trace
+        )
+    )
+    history = [*history, {"role": "assistant", "content": "Read."}]
+    asyncio.run(client.next_step(history, response_format=STEP_FORMAT, trace=trace))
+
+    assert challenge.hypothesis == "Dropped payload."
+    requests = [request["messages"] for request in fake_openai.completions.requests]
+    assert requests[1] == side
+    assert "schema" in requests[2][-1]["content"]
+    events = [json.loads(line) for line in trace.path.read_text(encoding="utf-8").splitlines()]
+    assert [event["role"] for event in events] == ["head", "challenger", "challenger", "head"]
+    assert llm_requests(events) == requests
+    # The head's next request stores only what it added, not its whole history again.
+    assert events[3]["payload"]["prefix"] == 1

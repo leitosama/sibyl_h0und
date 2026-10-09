@@ -72,7 +72,8 @@ class TaskTrace:
         self.llm_ms = 0
         self.runtime_calls = 0
         self._seq = 0
-        self._last_llm_request: list[dict[str, Any]] = []
+        # The last request of each role: a side turn shares no history with the head.
+        self._last_llm_request: dict[str, list[dict[str, Any]]] = {}
         self._started_at = time.perf_counter()
 
     @property
@@ -139,7 +140,12 @@ class TaskTrace:
         self.event("step", tool=tool, payload={"step": step})
 
     def local_answer(
-        self, kind: str, tool: str, arguments: dict[str, Any], feedback: dict[str, Any] | None
+        self,
+        kind: str,
+        tool: str,
+        arguments: dict[str, Any],
+        feedback: dict[str, Any] | None,
+        **fields: Any,
     ) -> None:
         """Write a call answered without the runtime.
 
@@ -150,11 +156,12 @@ class TaskTrace:
             tool: Tool the model asked for.
             arguments: Arguments of the call.
             feedback: Answer shown to the model, if it is worth keeping.
+            **fields: Small flat fields shown next to the common ones.
         """
         payload: dict[str, Any] = {"arguments": arguments}
         if feedback is not None:
             payload["feedback"] = feedback
-        self.event(kind, tool=tool, payload=payload)
+        self.event(kind, tool=tool, payload=payload, **fields)
 
     def tool_call(
         self, tool: str, arguments: dict[str, Any], response: dict[str, Any], duration_ms: int
@@ -191,28 +198,32 @@ class TaskTrace:
             payload={"task_result": task_result},
         )
 
-    def llm_call(self, messages: list[dict[str, Any]], *, raw_content: str, **fields: Any) -> None:
+    def llm_call(
+        self, messages: list[dict[str, Any]], *, raw_content: str, role: str, **fields: Any
+    ) -> None:
         """Append an `llm_call` event that stores only the request's new messages.
 
         The payload keeps `prefix`, the number of leading messages shared with
-        the previous `llm_call` of this task, and the messages after it, so the
-        trace grows linearly with the history. `llm_requests` rebuilds the
-        full requests.
+        the previous `llm_call` of the same role in this task, and the messages
+        after it, so the trace grows linearly with the history even when side
+        turns come between head turns. `llm_requests` rebuilds the full requests.
 
         Args:
             messages: Exact message list sent to the LLM.
             raw_content: Model reply as received.
+            role: `head` for the investigation's turns, or the side turn's name.
             **fields: Small flat fields shown next to the common ones.
         """
         if self.path is None:
             return
-        previous = self._last_llm_request
+        previous = self._last_llm_request.get(role, [])
         prefix = 0
         while prefix < min(len(previous), len(messages)) and previous[prefix] == messages[prefix]:
             prefix += 1
-        self._last_llm_request = list(messages)
+        self._last_llm_request[role] = list(messages)
         self.event(
             "llm_call",
+            role=role,
             payload={"prefix": prefix, "messages": messages[prefix:], "raw_content": raw_content},
             **fields,
         )
@@ -221,6 +232,9 @@ class TaskTrace:
 def llm_requests(events: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     """Rebuild the full message list of every `llm_call` event of one task.
 
+    A prefix counts from the previous request of the same role; an event
+    without a role, from older traces, is the head's.
+
     Args:
         events: Events of one task trace in file order.
 
@@ -228,13 +242,14 @@ def llm_requests(events: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
         One full request per `llm_call` event, in order.
     """
     requests: list[list[dict[str, Any]]] = []
-    current: list[dict[str, Any]] = []
+    current: dict[str, list[dict[str, Any]]] = {}
     for event in events:
         if event.get("kind") != "llm_call":
             continue
         payload = event["payload"]
-        current = current[: payload.get("prefix", 0)] + payload["messages"]
-        requests.append(current)
+        role = event.get("role", "head")
+        current[role] = current.get(role, [])[: payload.get("prefix", 0)] + payload["messages"]
+        requests.append(current[role])
     return requests
 
 
@@ -247,6 +262,25 @@ class RecordedCall:
     outcome: ToolOutcome
 
 
+@dataclass(frozen=True)
+class RecordedDraft:
+    """A report the model submitted, whether or not it reached the runtime.
+
+    Attributes:
+        calls_before: How many runtime calls came before it.
+        arguments: Arguments of the report call.
+        finish_only: Whether only the report could be called by then.
+    """
+
+    calls_before: int
+    arguments: dict[str, Any]
+    finish_only: bool = False
+
+
+# Local answers to a report: the report never reached the runtime.
+REPORT_ANSWERS = ("report_refused", "benign_challenged")
+
+
 @dataclass
 class RecordedTask:
     """What a trace says about one task.
@@ -257,6 +291,7 @@ class RecordedTask:
         observation: The task's observation as the agent received it, or `None`
             when the trace has no `task_start`.
         calls: Runtime calls in order.
+        drafts: Every report the model submitted, answered locally or sent.
         quality: Final quality score, `None` when the task never ended.
         reward: Final total reward, `None` when the task never ended.
     """
@@ -265,6 +300,7 @@ class RecordedTask:
     task_id: str | None = None
     observation: dict[str, Any] | None = None
     calls: list[RecordedCall] = field(default_factory=list)
+    drafts: list[RecordedDraft] = field(default_factory=list)
     quality: float | None = None
     reward: float | None = None
 
@@ -288,19 +324,24 @@ def read_task(path: Path) -> RecordedTask:
         agent decodes a live response, and the final scores.
     """
     task = RecordedTask()
+    kinds = ("task_start", "tool_call", "task_end", "finish_only", *REPORT_ANSWERS)
+    finish_only = False
     with path.open(encoding="utf-8") as lines:
         for line in lines:
-            if not any(
-                f'"kind": "{kind}"' in line for kind in ("task_start", "tool_call", "task_end")
-            ):
+            if not any(f'"kind": "{kind}"' in line for kind in kinds):
                 continue
             event = json.loads(line)
             kind = event.get("kind")
-            if kind not in {"task_start", "tool_call", "task_end"}:
+            if kind not in kinds:
                 continue
             task.run_id, task.task_id = event.get("run_id"), event.get("task_id")
             payload = event.get("payload") or {}
-            if kind == "task_start":
+            arguments = payload.get("arguments") or {}
+            if kind in REPORT_ANSWERS or (kind == "tool_call" and event.get("tool") == FINISH_TOOL):
+                task.drafts.append(RecordedDraft(len(task.calls), arguments, finish_only))
+            if kind == "finish_only":
+                finish_only = True
+            elif kind == "task_start":
                 task.observation = (payload.get("task") or {}).get("observation")
             elif kind == "task_end":
                 task.quality = event.get("quality_score")
@@ -312,7 +353,5 @@ def read_task(path: Path) -> RecordedTask:
                     observation=response.get("observation") or {},
                     terminal=response.get("task_result") is not None,
                 )
-                task.calls.append(
-                    RecordedCall(event.get("tool", ""), payload.get("arguments") or {}, outcome)
-                )
+                task.calls.append(RecordedCall(event.get("tool", ""), arguments, outcome))
     return task

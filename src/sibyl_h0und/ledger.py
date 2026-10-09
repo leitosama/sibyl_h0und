@@ -58,6 +58,9 @@ class GraphLedger:
     # Incoming and outgoing relation ids of every fetched entity.
     entity_relations: dict[str, dict[str, list[str]]] = field(default_factory=dict)
     cache: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Every entity or relation object the runtime returned, merged by id, in
+    # the order first seen: the alert's objects come first.
+    objects: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def observe_alert(self, alert: dict[str, Any]) -> None:
         """Record the ids named by the task observation.
@@ -155,7 +158,7 @@ class GraphLedger:
             summary["entities_with_open_relations"] = open_entities
         unvisited = self.unvisited_entities()
         if unvisited:
-            summary["unvisited_entities"] = _listing(unvisited)
+            summary["unvisited_entities"] = listing(unvisited)
         return summary
 
     def unvisited_entities(self) -> list[str]:
@@ -214,7 +217,7 @@ class GraphLedger:
                 continue
             problems.append(
                 f"{key} {value!r} was never returned by the runtime. "
-                f"Known unvisited {key}s: {_listing(valid())}."
+                f"Known unvisited {key}s: {listing(valid())}."
             )
         fields = arguments.get("property_fields")
         if cited is not None and isinstance(fields, list) and cited in self.properties:
@@ -233,7 +236,7 @@ class GraphLedger:
         return problems
 
     def _record_fetched(self, object_id: str, result: Any) -> None:
-        """Store the property keys of an object fetched by its id.
+        """Store an object fetched by its id and the keys of its properties.
 
         Only a response that carries the object itself, a dict whose `id` is
         the requested id, describes its properties. Any other response says
@@ -242,6 +245,7 @@ class GraphLedger:
         described = _find_object(result, object_id)
         if described is not None:
             _collect_keys(described, "", self.properties.setdefault(object_id, set()))
+            self.objects[object_id] = _merge(self.objects.get(object_id, {}), described)
 
     def _collect(self, node: Any, kind: str | None = None) -> None:
         """Walk a response and record every id it names.
@@ -267,6 +271,8 @@ class GraphLedger:
             object_kind = kind or _object_kind(node)
             if object_kind is not None:
                 self._add(object_id, object_kind)
+                # A mention inside a response only fills gaps of what is known.
+                self.objects[object_id] = _merge(node, self.objects.get(object_id, {}))
             if object_kind == "relation" and _is_full_relation(node):
                 # A search returns the same relation object as a fetch by id.
                 self.visited_relations.add(object_id)
@@ -293,6 +299,21 @@ class GraphLedger:
         return json.dumps(
             [tool_name, _strip_strings(relevant)], sort_keys=True, ensure_ascii=False, default=str
         )
+
+
+def _merge(base: dict[str, Any], winner: dict[str, Any]) -> dict[str, Any]:
+    """Merge two views of one object: nested dicts merge, other values come from `winner`.
+
+    A fetch by id is the full view and wins over what is known; a mention
+    inside a response (a search hit, an endpoint) only fills gaps.
+    """
+    merged = dict(base)
+    for key, value in winner.items():
+        old = merged.get(key)
+        merged[key] = (
+            _merge(old, value) if isinstance(old, dict) and isinstance(value, dict) else value
+        )
+    return merged
 
 
 def _strip_strings(value: Any) -> Any:
@@ -379,7 +400,7 @@ def _collect_keys(node: Any, prefix: str, keys: set[str]) -> None:
         _collect_keys(value, f"{path}.", keys)
 
 
-def _listing(ids: list[str]) -> list[str] | str:
+def listing(ids: list[str]) -> list[str] | str:
     """Show a short id list in full and a long one as a prefix and a count."""
     if len(ids) <= MAX_LISTED_IDS:
         return ids

@@ -16,10 +16,17 @@ from jsonschema.exceptions import SchemaError, best_match
 from jsonschema.validators import validator_for
 from loguru import logger
 
-from sibyl_h0und.models import PRACTICE_ARGUMENT_MODELS, StepEnvelope, normalize_time_windows
+from sibyl_h0und.models import (
+    PRACTICE_ARGUMENT_MODELS,
+    Challenge,
+    ChallengeCheck,
+    StepEnvelope,
+    normalize_time_windows,
+)
 
 FINISH_TOOL = "finish_investigation"
 RESPONSE_FORMAT_NAME = "bluesec1_next_step"
+CHALLENGE_FORMAT_NAME = "bluesec1_challenge"
 # Keys under which a catalog entry may carry the JSON Schema of its arguments.
 ARGUMENT_SCHEMA_KEYS = (
     "parameters",
@@ -68,7 +75,7 @@ class ToolCatalog:
                 self._schemas[name] = _argument_schema(name, spec)
         if FINISH_TOOL not in self._schemas:
             raise ValueError("The runtime did not advertise finish_investigation.")
-        self._formats: dict[frozenset[str], dict[str, Any]] = {}
+        self._formats: dict[tuple[str, frozenset[str]], dict[str, Any]] = {}
         self._validators = {
             name: _validator(name, schema)
             for name, schema in self._schemas.items()
@@ -167,6 +174,15 @@ class ToolCatalog:
             raise ValueError(f"Invalid {tool_name} arguments at {where}: {error.message}")
         return prepared
 
+    def specs_of(self, names: Iterable[str]) -> list[dict[str, Any]]:
+        """Catalog entries of the given tools, in catalog order."""
+        wanted = set(names)
+        return [spec for spec in self.specs if _tool_name(spec) in wanted]
+
+    def runtime_tools(self) -> list[str]:
+        """Names of the runtime's investigation tools: neither local nor the report."""
+        return [name for name in self.names if name != FINISH_TOOL and not self.is_local(name)]
+
     def response_format(self, tools: Iterable[str] | None = None) -> dict[str, Any]:
         """Build the strict `json_schema` response format of one step.
 
@@ -177,38 +193,81 @@ class ToolCatalog:
             OpenAI-compatible response format. It is strict unless an argument
             schema cannot be made strict, which leaves only local validation.
         """
+        names = self._allowed(tools)
+        key = ("step", names)
+        if key not in self._formats:
+            calls, definitions, strict = self._calls(names)
+            schema = StepEnvelope.model_json_schema()
+            schema["properties"]["function"] = {
+                **calls,
+                "description": "Execute the first remaining step.",
+            }
+            self._formats[key] = _format(RESPONSE_FORMAT_NAME, schema, definitions, strict)
+        return self._formats[key]
+
+    def challenge_format(self, tools: Iterable[str]) -> dict[str, Any]:
+        """Build the strict response format of the benign challenger (ADR 0022).
+
+        Args:
+            tools: Catalog tools a refuting check may call.
+
+        Returns:
+            OpenAI-compatible response format of a `Challenge`, whose checks
+            call these tools with their own argument schemas.
+        """
+        names = self._allowed(tools)
+        key = ("challenge", names)
+        if key not in self._formats:
+            calls, definitions, strict = self._calls(names)
+            check = ChallengeCheck.model_json_schema()
+            check["properties"]["call"] = {**calls, "description": "The tool call that checks it."}
+            check.pop("$defs", None)
+            _strict_object(check)
+            schema = Challenge.model_json_schema()
+            schema.pop("$defs", None)
+            schema["properties"]["checks"]["items"] = check
+            self._formats[key] = _format(CHALLENGE_FORMAT_NAME, schema, definitions, strict)
+        return self._formats[key]
+
+    def _allowed(self, tools: Iterable[str] | None) -> frozenset[str]:
+        """Keep the advertised tools among the requested ones; all when `None`."""
         names = frozenset(self._schemas if tools is None else tools).intersection(self._schemas)
         if not names:
             raise ValueError("A step must allow at least one advertised tool.")
-        if names not in self._formats:
-            self._formats[names] = self._build_format(
-                [name for name in self._schemas if name in names]
-            )
-        return self._formats[names]
+        return names
 
-    def _build_format(self, names: list[str]) -> dict[str, Any]:
-        """Assemble the step schema over the given tools."""
+    def _calls(self, names: frozenset[str]) -> tuple[dict[str, Any], dict[str, Any], bool]:
+        """Build the choice over calls of the given tools, in catalog order.
+
+        Returns:
+            The `anyOf` schema, the definitions it references and whether it
+            is valid in strict mode.
+        """
         definitions: dict[str, Any] = {}
         branches = []
         strict = True
-        for name in names:
+        for name in self._schemas:
+            if name not in names:
+                continue
             branch, branch_definitions, branch_strict = _function_branch(name, self._schemas[name])
             branches.append(branch)
             definitions.update(branch_definitions)
             strict = strict and branch_strict
-        schema = StepEnvelope.model_json_schema()
-        schema["properties"]["function"] = {
-            "anyOf": branches,
-            "description": "Execute the first remaining step.",
-        }
-        schema["required"] = list(schema["properties"])
-        _strict_object(schema)
-        if definitions:
-            schema["$defs"] = definitions
-        return {
-            "type": "json_schema",
-            "json_schema": {"name": RESPONSE_FORMAT_NAME, "strict": strict, "schema": schema},
-        }
+        return {"anyOf": branches}, definitions, strict
+
+
+def _format(
+    name: str, schema: dict[str, Any], definitions: dict[str, Any], strict: bool
+) -> dict[str, Any]:
+    """Close a top-level schema and wrap it as a `json_schema` response format."""
+    schema["required"] = list(schema["properties"])
+    _strict_object(schema)
+    if definitions:
+        schema["$defs"] = definitions
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": name, "strict": strict, "schema": schema},
+    }
 
 
 def _tool_name(spec: dict[str, Any]) -> str | None:

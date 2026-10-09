@@ -37,7 +37,7 @@ def test_missing_configuration_is_reported_without_traceback(monkeypatch, capsys
     monkeypatch.setitem(Settings.model_config, "env_file", Path("/nonexistent/.env"))
 
     with pytest.raises(SystemExit) as exit_info:
-        cli._load_settings()
+        cli.load_settings()
 
     assert exit_info.value.code == 1
     message = capsys.readouterr().err

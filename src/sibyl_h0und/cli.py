@@ -49,15 +49,8 @@ async def run(args: argparse.Namespace) -> None:
         args: Parsed command-line arguments.
     """
     truststore.inject_into_ssl()
-    settings = _load_settings()
-    llm = OpenAIStructuredStepClient(
-        base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key.get_secret_value(),
-        model=settings.llm_default_model,
-        timeout_seconds=settings.llm_timeout_seconds,
-        max_completion_tokens=settings.llm_max_completion_tokens,
-        max_retries=settings.llm_max_step_retries,
-    )
+    settings = load_settings()
+    llm = llm_client(settings)
     agent_name = args.agent_name or settings.agent_name
     verify_tls = (
         settings.scenario_runtime_verify_tls if args.verify_tls is None else args.verify_tls
@@ -133,7 +126,19 @@ def main() -> None:
         raise SystemExit(1) from error
 
 
-def _load_settings() -> Settings:
+def llm_client(settings: Settings) -> OpenAIStructuredStepClient:
+    """Build the LLM client the settings describe."""
+    return OpenAIStructuredStepClient(
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key.get_secret_value(),
+        model=settings.llm_default_model,
+        timeout_seconds=settings.llm_timeout_seconds,
+        max_completion_tokens=settings.llm_max_completion_tokens,
+        max_retries=settings.llm_max_step_retries,
+    )
+
+
+def load_settings() -> Settings:
     """Load settings and explain what is missing instead of raising a raw error.
 
     Returns:

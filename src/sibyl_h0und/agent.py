@@ -13,7 +13,7 @@ from bluesec1_client import (
 )
 from sibyl_h0und.budget import DEFAULT_MAX_RUNTIME_CALLS, CallBudget
 from sibyl_h0und.catalog import FINISH_TOOL
-from sibyl_h0und.investigation import Investigation, LocalAnswer
+from sibyl_h0und.investigation import Investigation, LocalAnswer, Review
 from sibyl_h0und.llm import StructuredStepClient, render_json
 from sibyl_h0und.outcome import ToolOutcome
 from sibyl_h0und.trace import TaskTrace, elapsed_ms, run_trace_dir, task_trace_path
@@ -155,6 +155,40 @@ Mechanics:
 - When told that only `{FINISH_TOOL}` remains, submit the verdict at once from the
   evidence already gathered.
 """.strip()
+
+
+async def run_review(
+    llm: StructuredStepClient,
+    investigation: Investigation,
+    review: Review,
+    trace: TaskTrace | None = None,
+) -> LocalAnswer:
+    """Run a side turn of the LLM and let the investigation answer the call.
+
+    The side turn is optional: whatever makes it fail, the investigation
+    answers without it, so the task never stops here (ADR 0009, 0022).
+
+    Args:
+        llm: The LLM client.
+        investigation: The task's investigation.
+        review: The side turn `before_call` asked for.
+        trace: Task trace that receives the side turn's `llm_call` events.
+
+    Returns:
+        The local answer to the model's call.
+    """
+    try:
+        reply = await llm.structured(
+            review.messages,
+            response_format=review.response_format,
+            model=review.model,
+            role=review.role,
+            trace=trace,
+        )
+    except Exception as exc:
+        logger.warning("The {} turn failed: {}", review.role, exc)
+        return investigation.after_review(review, None, f"{type(exc).__name__}: {exc}"[:500])
+    return investigation.after_review(review, reply)
 
 
 class AgentRunResult(BaseModel):
@@ -325,6 +359,8 @@ class SimpleSGRAgent:
             decision = investigation.before_call(
                 tool_name, step.function.arguments, finish_only=finish_only
             )
+            if isinstance(decision, Review):
+                decision = await run_review(self.llm, investigation, decision, trace)
             if isinstance(decision, LocalAnswer):
                 budget.record_local_answer()
                 feedback = decision.feedback

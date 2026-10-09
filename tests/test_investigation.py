@@ -5,7 +5,8 @@ from typing import Any
 import pytest
 
 from sibyl_h0und.catalog import FINISH_TOOL
-from sibyl_h0und.investigation import Investigation, LocalAnswer, Send
+from sibyl_h0und.investigation import Investigation, LocalAnswer, Review, Send
+from sibyl_h0und.models import Challenge
 from sibyl_h0und.outcome import ToolOutcome
 from sibyl_h0und.trace import TaskTrace
 
@@ -102,16 +103,91 @@ BENIGN_REPORT = {
 }
 
 
-def test_a_benign_verdict_is_challenged_once_then_sent() -> None:
-    """The first benign report asks for the kill chain around the alert; the next one is sent."""
-    investigation = Investigation(observation())
+def challenge(*calls: dict[str, Any]) -> Challenge:
+    """Build a challenger reply whose checks make these calls."""
+    return Challenge.model_validate(
+        {
+            "hypothesis": "The script in System32 is a dropped payload.",
+            "checks": [{"refuted_if": "No writer.", "call": call} for call in calls],
+        }
+    )
 
-    challenged = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
+
+def fetched_file_investigation(path: Path | None = None) -> Investigation:
+    """An investigation that fetched the alert's file once."""
+    investigation = Investigation(observation(), TaskTrace(path, task_id="t"))
+    sent = investigation.before_call("get_entity", get_entity())
+    assert isinstance(sent, Send)
+    investigation.after_call("get_entity", sent.arguments, ToolOutcome("ok", DROPPED_FILE))
+    return investigation
+
+
+def test_the_first_benign_report_goes_to_the_challenger_without_the_heads_reasoning() -> None:
+    """The challenger reads the alert and the evidence, may call only runtime tools, and
+    never sees the report it argues against."""
+    review = fetched_file_investigation().before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
+
+    assert isinstance(review, Review)
+    request = json.loads(review.messages[-1]["content"])
+    assert request["evidence"]["no_host"]["entities"] == [DROPPED_FILE]
+    assert BENIGN_REPORT["reasoning"] not in json.dumps(review.messages)
+    schema = json.dumps(review.response_format)
+    assert '"get_entity"' in schema
+    assert FINISH_TOOL not in schema
+
+
+def test_the_challengers_usable_checks_reach_the_model_and_the_next_report_is_sent() -> None:
+    """A check with an invented id is dropped, a repeated one is marked as made, and the
+    model's next report goes to the runtime as is."""
+    investigation = fetched_file_investigation()
+    review = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
+    assert isinstance(review, Review)
+
+    reply = challenge(
+        {"tool": "get_entity", "entity_id": "file-404", "reasoning": "Invented."},
+        {"tool": "get_entity", "entity_id": "file-1", "reasoning": "Again."},
+    )
+    answer = investigation.after_review(review, reply)
     again = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
 
-    assert isinstance(challenged, LocalAnswer)
-    assert "one stage before" in challenged.feedback["message"]
+    assert answer.feedback["challenge"] == {
+        "hypothesis": reply.hypothesis,
+        "checks": [
+            {
+                "call": {"tool": "get_entity", "entity_id": "file-1", "reasoning": "Again."},
+                "refuted_if": "No writer.",
+                "already_made": True,
+            }
+        ],
+    }
     assert again == Send({"submission": BENIGN_REPORT})
+
+
+@pytest.mark.parametrize(
+    ("reply", "error"),
+    [
+        (None, "NextStepRequestError: invalid JSON"),
+        (challenge({"tool": "get_entity", "entity_id": "file-404", "reasoning": "x"}), None),
+    ],
+    ids=["challenger-failed", "no-usable-check"],
+)
+def test_without_a_usable_challenge_the_model_gets_the_general_question(
+    tmp_path: Path, reply: Challenge | None, error: str | None
+) -> None:
+    """The run never depends on the challenger: the general question replaces it, and the
+    trace says why."""
+    path = tmp_path / "t.trace.jsonl"
+    investigation = fetched_file_investigation(path)
+    review = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
+    assert isinstance(review, Review)
+
+    answer = investigation.after_review(review, reply, error)
+
+    assert "one stage before" in answer.feedback["message"]
+    assert "challenge" not in answer.feedback
+    event = json.loads(path.read_text().splitlines()[-1])
+    assert event["kind"] == "benign_challenged"
+    assert event["fallback"] == (error or "no usable check")
 
 
 def test_a_placeholder_benign_report_is_refused_and_challenged_in_one_answer() -> None:
@@ -303,7 +379,6 @@ def test_local_decisions_are_traced(tmp_path: Path) -> None:
     investigation.before_call("get_entity", get_entity())
 
     investigation.before_call("lookup_knowledge", {"query": "x"})
-    investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
 
     kinds = [json.loads(line)["kind"] for line in path.read_text().splitlines()]
 
@@ -312,5 +387,4 @@ def test_local_decisions_are_traced(tmp_path: Path) -> None:
         "tool_invalid",
         "tool_cached",
         "tool_knowledge",
-        "benign_challenged",
     ]

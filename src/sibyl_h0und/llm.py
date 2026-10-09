@@ -2,8 +2,9 @@ import asyncio
 import json
 import re
 import time
+from collections.abc import Callable
 from types import TracebackType
-from typing import Any, Protocol, Self, cast
+from typing import Any, Protocol, Self, TypeVar, cast
 
 from loguru import logger
 from openai import (
@@ -18,7 +19,7 @@ from openai import (
 )
 from openai.types.chat import ChatCompletionMessageParam
 from openai.types.shared_params import ResponseFormatJSONSchema
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from sibyl_h0und.models import NextStep
 from sibyl_h0und.trace import TaskTrace
@@ -50,6 +51,16 @@ MAX_TIMEOUT_RETRIES = 1
 REPAIR_INSTRUCTION = (
     "Your previous reply violated the required NextStep contract. " + STRUCTURED_OUTPUT_INSTRUCTION
 )
+# Repair request of a side turn, whose schema is its own.
+SIDE_REPAIR_INSTRUCTION = (
+    "Your previous reply did not match the required JSON schema: {error}. Return exactly one "
+    "JSON object that matches it, with no prose, markdown or extra keys."
+)
+# The role of the investigation's own turns in `llm_call` events.
+HEAD_ROLE = "head"
+
+ModelT = TypeVar("ModelT", bound=BaseModel)
+ReplyT = TypeVar("ReplyT")
 
 
 class NextStepRequestError(RuntimeError):
@@ -67,6 +78,18 @@ class StructuredStepClient(Protocol):
         trace: TaskTrace | None = None,
     ) -> NextStep:
         """Generate and validate one investigation step under the task's step schema."""
+        ...
+
+    async def structured(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        response_format: dict[str, Any],
+        model: type[ModelT],
+        role: str,
+        trace: TaskTrace | None = None,
+    ) -> ModelT:
+        """Generate and validate one side-turn reply, such as the challenger's."""
         ...
 
 
@@ -156,7 +179,77 @@ class OpenAIStructuredStepClient:
                 0,
                 {"role": "system", "content": STRUCTURED_OUTPUT_INSTRUCTION},
             )
-        trace = trace or TaskTrace(None)
+        step = await self._generate(
+            request_messages,
+            response_format,
+            parse_next_step_payload,
+            lambda _: REPAIR_INSTRUCTION,
+            HEAD_ROLE,
+            trace or TaskTrace(None),
+        )
+        logger.info("LLM selected {}.", step.function.tool)
+        return step
+
+    async def structured(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        response_format: dict[str, Any],
+        model: type[ModelT],
+        role: str,
+        trace: TaskTrace | None = None,
+    ) -> ModelT:
+        """Return one valid reply of a side turn, repairing malformed replies when possible.
+
+        The messages carry their own instructions; nothing is added to them.
+
+        Args:
+            messages: The side turn's request.
+            response_format: The side turn's schema.
+            model: Model that validates the reply.
+            role: Name of the side turn in `llm_call` events.
+            trace: Task trace that receives one `llm_call` event per attempt.
+
+        Returns:
+            The validated reply.
+
+        Raises:
+            NextStepRequestError: If every provider reply violates the schema.
+        """
+        return await self._generate(
+            list(messages),
+            response_format,
+            lambda raw: parse_model_payload(raw, model),
+            lambda error: SIDE_REPAIR_INSTRUCTION.format(error=error),
+            role,
+            trace or TaskTrace(None),
+        )
+
+    async def _generate(
+        self,
+        request_messages: list[dict[str, Any]],
+        response_format: dict[str, Any],
+        parse: Callable[[str], ReplyT],
+        repair: Callable[[ValueError], str],
+        role: str,
+        trace: TaskTrace,
+    ) -> ReplyT:
+        """Request replies until one parses, asking the model to repair each failure.
+
+        Args:
+            request_messages: Full request; repair turns are appended to it.
+            response_format: Schema sent with the request.
+            parse: Validation of one raw reply; raises `ValueError` on failure.
+            repair: The repair instruction for a parse error.
+            role: Name of the turn in `llm_call` events.
+            trace: Task trace that receives one `llm_call` event per attempt.
+
+        Returns:
+            The first reply that parses.
+
+        Raises:
+            NextStepRequestError: If every provider reply violates the schema.
+        """
         last_error: Exception | None = None
 
         for attempt in range(1, self.max_retries + 1):
@@ -169,17 +262,19 @@ class OpenAIStructuredStepClient:
             trace.llm_call(
                 request_messages,
                 raw_content=raw_content,
+                role=role,
                 attempt=attempt,
                 tokens=total_tokens,
                 duration_ms=latency_ms,
             )
 
             try:
-                step = parse_next_step_payload(raw_content)
+                reply = parse(raw_content)
             except ValueError as exc:
                 last_error = exc
                 logger.warning(
-                    "Invalid structured LLM response on attempt {}/{}: {}",
+                    "Invalid structured {} response on attempt {}/{}: {}",
+                    role,
                     attempt,
                     self.max_retries,
                     raw_content[:2000] or str(exc),
@@ -189,18 +284,15 @@ class OpenAIStructuredStepClient:
                 request_messages.extend(
                     [
                         {"role": "assistant", "content": raw_content or "<empty>"},
-                        {"role": "user", "content": REPAIR_INSTRUCTION},
+                        {"role": "user", "content": repair(exc)},
                     ]
                 )
                 continue
 
             logger.info(
-                "LLM selected {} in {} ms using {} tokens.",
-                step.function.tool,
-                latency_ms,
-                total_tokens,
+                "LLM answered the {} turn in {} ms using {} tokens.", role, latency_ms, total_tokens
             )
-            return step
+            return reply
 
         message = str(last_error or ValueError("Unable to parse model response."))
         raise NextStepRequestError(message) from last_error
@@ -363,6 +455,31 @@ def parse_next_step_payload(raw_content: str) -> NextStep:
         raise ValueError("Model returned invalid NextStep JSON.") from exc
 
     return step
+
+
+def parse_model_payload(raw_content: str, model: type[ModelT]) -> ModelT:
+    """Validate one raw provider reply against a side turn's model.
+
+    Args:
+        raw_content: Assistant response containing one JSON object.
+        model: Model of the reply.
+
+    Returns:
+        The validated reply.
+
+    Raises:
+        ValueError: If the reply is empty or does not match the model.
+    """
+    if not raw_content:
+        raise ValueError(f"Model returned empty content for {model.__name__}.")
+    try:
+        return model.model_validate_json(extract_json_object(raw_content))
+    except ValidationError as exc:
+        problems = "; ".join(
+            f"{'.'.join(map(str, error['loc'])) or 'reply'}: {error['msg']}"
+            for error in exc.errors()[:3]
+        )
+        raise ValueError(f"Invalid {model.__name__} JSON: {problems}") from exc
 
 
 def response_total_tokens(response: Any) -> int:

@@ -349,6 +349,26 @@ class NextStep(StepEnvelope):
     function: ToolCall = Field(description="Execute the first remaining step.")
 
 
+class ChallengeCheck(BaseModel):
+    """One call that would refute the challenger's attack hypothesis."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    refuted_if: str = Field(min_length=1, description="The result that refutes the hypothesis.")
+    call: ToolCall = Field(description="The tool call that checks it.")
+
+
+class Challenge(BaseModel):
+    """The challenger's case against a benign verdict (ADR 0022)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    hypothesis: str = Field(
+        min_length=1, description="The strongest attack reading of the same evidence."
+    )
+    checks: list[ChallengeCheck] = Field(min_length=1, max_length=3)
+
+
 def _drop_nulls(value: Any) -> Any:
     """Remove `None` values from dicts at every depth.
 
