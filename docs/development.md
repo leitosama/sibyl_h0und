@@ -11,8 +11,9 @@ cp .env.example .env.h0und1   # токен для зачёта,     AGENT_NAME=h
 ```
 
 В профилях задаются `SCENARIO_RUNTIME_TOKEN` (с сайта соревнования) и
-`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_DEFAULT_MODEL` (от провайдера). Все
-`.env*`, кроме `.env.example`, игнорируются git'ом.
+`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_DEFAULT_MODEL` (от провайдера).
+Необязательный `LLM_CHALLENGER_MODEL` даёт челленджеру свою модель того же
+провайдера (ADR 0025). Все `.env*`, кроме `.env.example`, игнорируются git'ом.
 
 Запуск:
 

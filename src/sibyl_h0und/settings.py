@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from sibyl_h0und.budget import DEFAULT_MAX_RUNTIME_CALLS, RUNTIME_CALL_LIMIT
@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     llm_base_url: str = Field(validation_alias="LLM_BASE_URL", min_length=1)
     llm_api_key: SecretStr = Field(validation_alias="LLM_API_KEY", min_length=1)
     llm_default_model: str = Field(validation_alias="LLM_DEFAULT_MODEL", min_length=1)
+    # Model of the benign challenger; unset, it is the default model (ADR 0025).
+    llm_challenger_model: str | None = Field(
+        default=None, validation_alias="LLM_CHALLENGER_MODEL", min_length=1
+    )
     llm_timeout_seconds: float = Field(
         default=120.0,
         validation_alias="LLM_TIMEOUT_SECONDS",
@@ -79,3 +83,9 @@ class Settings(BaseSettings):
     )
     trace_enabled: bool = Field(default=True, validation_alias="TRACE_ENABLED")
     trace_dir: Path = Field(default_factory=default_trace_dir, validation_alias="TRACE_DIR")
+
+    @field_validator("llm_challenger_model", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value: object) -> object:
+        """Read a blank model, such as `LLM_CHALLENGER_MODEL=`, as unset."""
+        return None if isinstance(value, str) and not value.strip() else value
