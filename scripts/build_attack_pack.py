@@ -5,8 +5,9 @@ Usage: uv run python scripts/build_attack_pack.py [--input enterprise-attack.jso
 Without `--input` the script downloads the Enterprise ATT&CK bundle and writes
 three snapshots to `src/sibyl_h0und/knowledge/`:
 
-- `attack_techniques.json`: technique id to name, tactics, platforms and the
-  opening of the description;
+- `attack_techniques.json`: technique id to name, tactics, platforms, the
+  opening of the description and, when ATT&CK has a detection strategy for it,
+  the names of the data components its analytics read, by platform;
 - `attack_software.json`: software id (`S0195`) to name, type, the opening of
   the description and the technique ids it uses;
 - `attack_software_names.json`: program-like names and aliases to software id.
@@ -30,6 +31,7 @@ URL = (
     "enterprise-attack/enterprise-attack.json"
 )
 SOFTWARE_TYPES = ("tool", "malware")
+DETECTION_TYPES = ("x-mitre-detection-strategy", "x-mitre-analytic", "x-mitre-data-component")
 # A name that can be a file name: no spaces, no path or option characters.
 PROGRAM_LIKE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,63}$")
 SUMMARY_LENGTH = 420
@@ -65,6 +67,31 @@ def summary(text: str | None) -> str:
     return cut[: end + 1] if end > SUMMARY_LENGTH // 2 else cut.rstrip() + "…"
 
 
+def _data_components(strategy: dict | None, detection: dict[str, dict]) -> set[tuple[str, str]]:
+    """Name the data components a detection strategy's analytics read, by platform.
+
+    Args:
+        strategy: The source of a `detects` relationship; only an active
+            detection strategy has analytics.
+        detection: Active detection strategies, analytics and data components by id.
+
+    Returns:
+        `(platform, data component name)` pairs, one per platform of the analytic.
+    """
+    if strategy is None or strategy["type"] != "x-mitre-detection-strategy":
+        return set()
+    found = set()
+    for ref in strategy.get("x_mitre_analytic_refs", []):
+        if (analytic := detection.get(ref)) is None:
+            continue
+        for source in analytic.get("x_mitre_log_source_references", []):
+            if (component := detection.get(source.get("x_mitre_data_component_ref"))) is None:
+                continue
+            platforms = analytic.get("x_mitre_platforms", [])
+            found |= {(platform, component["name"]) for platform in platforms}
+    return found
+
+
 def _pack(name: str, key: str, entries: dict, raw: bytes, retrieved: str) -> dict:
     return {
         "name": name,
@@ -93,22 +120,34 @@ def build(raw: bytes, retrieved: str) -> list[dict]:
     technique_ids = {
         item["id"]: _attack_id(item) for item in objects if item["type"] == "attack-pattern"
     }
+    detection = {item["id"]: item for item in objects if item["type"] in DETECTION_TYPES}
     used: dict[str, set[str]] = {}
+    detected_by: dict[str, dict[str, set[str]]] = {}
     for item in objects:
         technique = technique_ids.get(item.get("target_ref"))
-        if item["type"] == "relationship" and item.get("relationship_type") == "uses" and technique:
+        if item["type"] != "relationship" or not technique:
+            continue
+        if item.get("relationship_type") == "uses":
             used.setdefault(item["source_ref"], set()).add(technique)
+        elif item.get("relationship_type") == "detects":
+            pairs = _data_components(detection.get(item["source_ref"]), detection)
+            for platform, name in pairs:
+                detected_by.setdefault(technique, {}).setdefault(platform, set()).add(name)
 
-    techniques = {
-        technique_ids[item["id"]]: {
+    techniques = {}
+    for item in objects:
+        if item["type"] != "attack-pattern" or not (technique := technique_ids[item["id"]]):
+            continue
+        techniques[technique] = {
             "name": item["name"],
             "tactics": [phase["phase_name"] for phase in item.get("kill_chain_phases", [])],
             "platforms": item.get("x_mitre_platforms", []),
             "summary": summary(item.get("description")),
         }
-        for item in objects
-        if item["type"] == "attack-pattern" and technique_ids[item["id"]]
-    }
+        if components := detected_by.get(technique):
+            techniques[technique]["data_components"] = {
+                platform: sorted(names) for platform, names in sorted(components.items())
+            }
     software: dict[str, dict] = {}
     names: dict[str, dict] = {}
     ordered = sorted(

@@ -155,6 +155,79 @@ def test_attack_build_links_software_to_techniques_and_skips_revoked_objects(
     assert packs["attack_techniques"].lookup("T1485")["tactics"] == ["impact"]
 
 
+def test_attack_build_names_the_data_components_a_technique_is_detected_by(
+    tmp_path: Path,
+) -> None:
+    """A technique keeps its analytics' data components by platform; one without has none."""
+
+    def technique(index: int, attack_id: str) -> dict:
+        return {
+            "type": "attack-pattern",
+            "id": f"attack-pattern--{index}",
+            "name": attack_id,
+            "external_references": [{"source_name": "mitre-attack", "external_id": attack_id}],
+        }
+
+    def component(index: int, name: str, **flags: bool) -> dict:
+        return {"type": "x-mitre-data-component", "id": f"dc--{index}", "name": name, **flags}
+
+    bundle = {
+        "objects": [
+            technique(1, "T1021.006"),
+            technique(2, "T1595"),
+            component(1, "Logon Session Creation"),
+            component(2, "Process Creation"),
+            component(3, "Old Component", x_mitre_deprecated=True),
+            {
+                "type": "x-mitre-analytic",
+                "id": "analytic--1",
+                "x_mitre_platforms": ["Windows"],
+                "x_mitre_log_source_references": [
+                    {"x_mitre_data_component_ref": "dc--1", "name": "WinEventLog:Security"},
+                    {"x_mitre_data_component_ref": "dc--3", "name": "WinEventLog:Security"},
+                ],
+            },
+            {
+                "type": "x-mitre-analytic",
+                "id": "analytic--2",
+                "x_mitre_platforms": ["Windows"],
+                "x_mitre_log_source_references": [
+                    {"x_mitre_data_component_ref": "dc--2", "name": "WinEventLog:Sysmon"},
+                    {"x_mitre_data_component_ref": "dc--1", "name": "WinEventLog:Security"},
+                ],
+            },
+            {
+                "type": "x-mitre-analytic",
+                "id": "analytic--3",
+                "x_mitre_platforms": ["Linux"],
+                "x_mitre_log_source_references": [
+                    {"x_mitre_data_component_ref": "dc--2", "name": "auditd:SYSCALL"},
+                ],
+            },
+            {
+                "type": "x-mitre-detection-strategy",
+                "id": "strategy--1",
+                "x_mitre_analytic_refs": ["analytic--1", "analytic--2", "analytic--3"],
+            },
+            {
+                "type": "relationship",
+                "relationship_type": "detects",
+                "source_ref": "strategy--1",
+                "target_ref": "attack-pattern--1",
+            },
+        ]
+    }
+    techniques = read_pack(
+        write(tmp_path / "techniques.json", build_attack(json.dumps(bundle).encode(), "x")[0])
+    )
+
+    assert techniques.lookup("T1021.006")["data_components"] == {
+        "Linux": ["Process Creation"],
+        "Windows": ["Logon Session Creation", "Process Creation"],
+    }
+    assert "data_components" not in techniques.lookup("T1595")
+
+
 def test_lolrmm_build_keys_executables_and_domains_and_drops_generic_names(tmp_path: Path) -> None:
     """Executable names and wildcard domains are keyed as the lookup normalizes them."""
     upstream = [

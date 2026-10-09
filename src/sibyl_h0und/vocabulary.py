@@ -10,7 +10,8 @@ term is safe.
 A query is one string. It is matched the same way whatever it is:
 
 - an ATT&CK id (`T1036.003`, `S0195`) finds the technique or software, and a
-  technique brings the software documented to use it;
+  technique brings the software documented to use it and, by platform, the data
+  components ATT&CK's detection analytics read for it;
 - a file name or path finds entries by normalized program name, and a name
   with a version or `.exe` is reduced the same way the packs were built;
 - a domain finds the RMM tool of that domain or of a parent domain;
