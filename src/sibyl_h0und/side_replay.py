@@ -1,12 +1,13 @@
-"""Offline harness of the finish gate's side turns over saved task traces (ADR 0022, 0023).
+"""Offline harness of the finish gate's side turns over saved task traces (ADR 0022, 0023, 0028).
 
 No runtime is involved: a trace already holds every tool response. For each
 task the harness replays the runtime calls and reports as the live agent
 made them, up to the report that reaches the chosen side turn: the first
-benign report for the challenger, the report that was sent for the reporter.
+benign report for the challenger, the benign report that answers the
+challenge for the answer review, the report that was sent for the reporter.
 It then runs only that side turn with the configured LLM and prints, per
-task, the challenger's hypothesis and checks or how the reporter's report
-differs from the draft.
+task, the challenger's hypothesis and checks, how the answer review rates
+each answer, or how the reporter's report differs from the draft.
 
 Tasks are split into a dev half and a holdout half by a hash of the task id,
 fixed before any prompt work: practice runs repeat task ids, so one task stays
@@ -20,7 +21,7 @@ import hashlib
 import json
 from collections import Counter
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ from sibyl_h0und.agent import settle
 from sibyl_h0und.catalog import FINISH_TOOL
 from sibyl_h0und.cli import llm_client, load_settings
 from sibyl_h0und.investigation import (
+    ANSWER_REVIEW_ROLE,
     CHALLENGER_ROLE,
     REPORTER_ROLE,
     Investigation,
@@ -40,12 +42,12 @@ from sibyl_h0und.investigation import (
     report_verdict,
 )
 from sibyl_h0und.llm import StructuredStepClient
-from sibyl_h0und.models import Challenge
+from sibyl_h0und.models import MAX_CHALLENGE_CHECKS, AnswerReview, Challenge, CheckOutcome
 from sibyl_h0und.replay import DEFAULT_TRACES, DEFAULT_WRONG_BELOW, TRACE_GLOB
 from sibyl_h0und.trace import RecordedTask, read_task
 
 SPLITS = ("dev", "holdout")
-ROLES = (CHALLENGER_ROLE, REPORTER_ROLE)
+ROLES = (CHALLENGER_ROLE, ANSWER_REVIEW_ROLE, REPORTER_ROLE)
 # Report keys whose value names a cited entity or relation.
 CITATION_KEYS = ("entity_id", "relation_id")
 
@@ -60,6 +62,8 @@ class Case:
         investigation: The investigation rebuilt up to the report.
         review: The side turn the report asks for.
         recorded: The local answer the live agent gave the report, if any.
+        outcomes: The answer review's rating of each check, once it ran.
+        review_error: Why the answer review failed, if it did.
     """
 
     task: RecordedTask
@@ -67,6 +71,8 @@ class Case:
     investigation: Investigation
     review: Review
     recorded: dict[str, Any] | None = None
+    outcomes: list[dict[str, Any]] = field(default_factory=list)
+    review_error: str | None = None
 
     @property
     def final_verdict(self) -> str | None:
@@ -77,13 +83,13 @@ class Case:
     def is_wrong(self, wrong_below: float) -> bool | None:
         """Whether the task ended with a low quality; `None` when it never ended.
 
-        For the challenger only a benign ending counts: it is what the
-        challenger is there to catch.
+        For the challenger and the answer review only a benign ending counts:
+        it is what they are there to catch.
         """
         if self.task.quality is None:
             return None
         low = self.task.quality < wrong_below
-        return low and (self.review.role != CHALLENGER_ROLE or self.final_verdict == "benign")
+        return low and (self.review.role == REPORTER_ROLE or self.final_verdict == "benign")
 
 
 def split_of(task_id: str) -> str:
@@ -98,11 +104,12 @@ def build_case(task: RecordedTask, role: str = CHALLENGER_ROLE) -> Case | None:
     agent did, so a report refused earlier, or one made when only the report
     remained, is answered as it was live. A challenger turn met on the way to
     the reporter gets the challenge the trace recorded, or the general
-    question when the trace has none.
+    question when the trace has none; an answer review met on the way refuses
+    or settles the report as the trace says it did.
 
     Args:
         task: A recorded task.
-        role: `challenger` or `reporter`.
+        role: `challenger`, `answer_review` or `reporter`.
 
     Returns:
         The case, or `None` when no report reaches that side turn.
@@ -119,6 +126,13 @@ def build_case(task: RecordedTask, role: str = CHALLENGER_ROLE) -> Case | None:
         decision = investigation.before_call(
             FINISH_TOOL, draft.arguments, finish_only=draft.finish_only, state=draft.state
         )
+        if (
+            isinstance(decision, Review)
+            and decision.role == ANSWER_REVIEW_ROLE
+            and role != ANSWER_REVIEW_ROLE
+        ):
+            # The trace holds a refused report as a local answer, a settled one as sent.
+            decision = investigation.after_review(decision, recorded_review(draft.feedback))
         if isinstance(decision, Review) and decision.role == role:
             return Case(task, split_of(task.task_id), investigation, decision, draft.feedback)
         if isinstance(decision, Review) and decision.role == CHALLENGER_ROLE:
@@ -131,11 +145,23 @@ def build_case(task: RecordedTask, role: str = CHALLENGER_ROLE) -> Case | None:
     return None
 
 
+def recorded_review(feedback: dict[str, Any] | None) -> AnswerReview:
+    """An answer review that refuses or settles every check, as the trace recorded."""
+    outcome = "not_shown" if feedback is not None else "refuted"
+    return AnswerReview(
+        checks=[
+            CheckOutcome(n=n, outcome=outcome, why="As the trace recorded.")
+            for n in range(1, MAX_CHALLENGE_CHECKS + 1)
+        ]
+    )
+
+
 def recorded_challenge(feedback: dict[str, Any] | None) -> tuple[Challenge | None, str | None]:
     """Read the challenge a trace recorded, or say why there is none.
 
     Traces written before ADR 0026 hold checks of another shape; their
-    challenge reads as missing.
+    challenge reads as missing. The technique ids come back from the
+    recorded vocabulary entries, so the replay looks them up again (ADR 0028).
     """
     recorded = (feedback or {}).get("challenge")
     if not recorded:
@@ -149,8 +175,11 @@ def recorded_challenge(feedback: dict[str, Any] | None) -> tuple[Challenge | Non
             else {"call": check.get("call")}
         )
         checks.append({**check, "source": source})
+    techniques = [entry["id"] for entry in recorded.get("knowledge", []) if entry.get("id")]
     try:
-        return Challenge.model_validate({**recorded, "checks": checks}), None
+        return Challenge.model_validate(
+            {**recorded, "checks": checks, "techniques": techniques}
+        ), None
     except ValidationError:
         return None, "the trace's challenge predates ADR 0026"
 
@@ -169,9 +198,28 @@ def load_cases(
             yield case
 
 
-async def side_turn(case: Case, llm: StructuredStepClient) -> LocalAnswer | Send:
-    """Run the case's side turn, with its repair turn if it asks for one, as the agent does."""
-    return await settle(llm, case.investigation, case.review)
+async def side_turn(case: Case, llm: StructuredStepClient) -> LocalAnswer | Send | Review:
+    """Run the case's side turn, with its repair turn if it asks for one, as the agent does.
+
+    The answer review is run alone: settled answers would go on to the
+    reporter, and the reporter's turn is returned instead of being run.
+    """
+    review = case.review
+    if review.role != ANSWER_REVIEW_ROLE:
+        return await settle(llm, case.investigation, review)
+    try:
+        reply = await llm.structured(
+            review.messages,
+            response_format=review.response_format,
+            model=review.model,
+            role=review.role,
+        )
+    except Exception as exc:
+        case.review_error = f"{type(exc).__name__}: {exc}"[:500]
+        return case.investigation.after_review(review, None, case.review_error)
+    if isinstance(reply, AnswerReview):
+        case.outcomes = [item.model_dump() for item in reply.checks]
+    return case.investigation.after_review(review, reply)
 
 
 def cited_ids(node: Any) -> list[str]:
@@ -184,7 +232,7 @@ def cited_ids(node: Any) -> list[str]:
     return own + [item for value in node.values() for item in cited_ids(value)]
 
 
-def render(case: Case, answer: LocalAnswer | Send, wrong_below: float) -> str:
+def render(case: Case, answer: LocalAnswer | Send | Review, wrong_below: float) -> str:
     """Show one task's side turn as text."""
     wrong = {True: " WRONG", False: "", None: " (unfinished)"}[case.is_wrong(wrong_below)]
     quality = "-" if case.task.quality is None else f"{case.task.quality:.2f}"
@@ -192,6 +240,18 @@ def render(case: Case, answer: LocalAnswer | Send, wrong_below: float) -> str:
         f"== {case.split} {case.task.run_id}/{case.task.task_id} "
         f"final={case.final_verdict} q={quality}{wrong}"
     ]
+    if case.review.role == ANSWER_REVIEW_ROLE:
+        request = json.loads(case.review.messages[-1]["content"])
+        lines.append(f"  answers: {request.get('answers')}")
+        lines.extend(f"  {item['n']}. {item['outcome']}: {item['why']}" for item in case.outcomes)
+        if case.review_error is not None:
+            lines.append(f"  review failed, the report goes to the reporter: {case.review_error}")
+        elif isinstance(answer, LocalAnswer):
+            lines.append(f"  REFUSED: {answer.feedback['message']}")
+        else:
+            lines.append("  settled: the report goes to the reporter")
+        return "\n".join(lines)
+    assert not isinstance(answer, Review)
     if isinstance(answer, Send):
         draft = case.review.arguments
         if case.investigation.report_fallback is not None:
@@ -242,11 +302,25 @@ async def run(args: argparse.Namespace, llm: StructuredStepClient) -> None:
     print(f"{len(cases)} reports for the {args.role} (split {args.split}).")
     out = args.out.open("w", encoding="utf-8") if args.out else None
     totals = {"recorded": Counter[str](), "replayed": Counter[str]()}
+    # Answer review: refused or settled, by whether the task ended wrong.
+    refusals = Counter[str]()
     try:
         for case in cases:
             answer = await side_turn(case, llm)
             print(render(case, answer, args.wrong_below), flush=True)
-            if isinstance(answer, LocalAnswer):
+            if case.review.role == ANSWER_REVIEW_ROLE:
+                ended = {True: "wrong", False: "not wrong", None: "unfinished"}[
+                    case.is_wrong(args.wrong_below)
+                ]
+                outcome = (
+                    "failed"
+                    if case.review_error is not None
+                    else "refused"
+                    if isinstance(answer, LocalAnswer)
+                    else "settled"
+                )
+                refusals[f"{ended}: {outcome}"] += 1
+            elif isinstance(answer, LocalAnswer):
                 totals["recorded"].update(check_counts(case.recorded))
                 totals["replayed"].update(check_counts(answer.feedback))
             if out is not None:
@@ -261,8 +335,11 @@ async def run(args: argparse.Namespace, llm: StructuredStepClient) -> None:
                 if isinstance(answer, Send):
                     record["draft"] = case.review.arguments
                     record["report"] = answer.arguments
-                else:
+                elif isinstance(answer, LocalAnswer):
                     record["feedback"] = answer.feedback
+                else:
+                    record["settled"] = case.review_error is None
+                    record["review_error"] = case.review_error
                 out.write(json.dumps(record, ensure_ascii=False) + "\n")
     finally:
         if out is not None:
@@ -270,6 +347,8 @@ async def run(args: argparse.Namespace, llm: StructuredStepClient) -> None:
     if args.role == CHALLENGER_ROLE:
         for name, total in totals.items():
             print(f"{name}: {dict(total)}")
+    if args.role == ANSWER_REVIEW_ROLE:
+        print(f"answer review: {dict(refusals)}")
 
 
 def main(argv: list[str] | None = None) -> None:

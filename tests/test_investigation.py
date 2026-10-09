@@ -6,7 +6,7 @@ import pytest
 
 from sibyl_h0und.catalog import FINISH_TOOL
 from sibyl_h0und.investigation import Investigation, LocalAnswer, Review, Send
-from sibyl_h0und.models import Challenge, ToolCall
+from sibyl_h0und.models import AnswerReview, Challenge, ToolCall
 from sibyl_h0und.outcome import ToolOutcome
 from sibyl_h0und.trace import TaskTrace
 
@@ -669,3 +669,145 @@ def test_local_decisions_are_traced(tmp_path: Path) -> None:
         "tool_cached",
         "tool_knowledge",
     ]
+
+
+def challenged_investigation(path: Path | None = None) -> Investigation:
+    """An investigation whose benign report was challenged with one seen check."""
+    investigation = fetched_file_investigation(path)
+    review = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
+    assert isinstance(review, Review)
+    investigation.after_review(review, challenge(seen("file-1", "path")))
+    return investigation
+
+
+def rated(outcome: str) -> AnswerReview:
+    """An answer review that rates the one check with this outcome."""
+    return AnswerReview.model_validate(
+        {"checks": [{"n": 1, "outcome": outcome, "why": "The writer is null."}]}
+    )
+
+
+def test_settled_answers_to_a_challenge_lead_to_the_reporter() -> None:
+    """A benign report that answers the checks is reviewed once, then written."""
+    investigation = challenged_investigation()
+
+    review = investigation.before_call(
+        FINISH_TOOL, {"submission": BENIGN_REPORT}, state="1: written by the updater -> refutes"
+    )
+    assert isinstance(review, Review)
+    assert review.role == "answer_review"
+    request = json.loads(review.messages[-1]["content"])
+    reporter = investigation.after_review(review, rated("refuted"))
+
+    assert request["answers"] == "1: written by the updater -> refutes"
+    assert request["challenge"]["checks"][0]["look_for"] == "Who wrote the script."
+    assert to_reporter(reporter) == {"submission": BENIGN_REPORT}
+
+
+def test_unsettled_answers_refuse_the_report_once_and_the_new_answers_reach_the_reporter(
+    tmp_path: Path,
+) -> None:
+    """A check answered without its fact sends the report back once, naming the check;
+    the next report is written whatever it says, with its own answers."""
+    path = tmp_path / "t.trace.jsonl"
+    investigation = challenged_investigation(path)
+    review = investigation.before_call(
+        FINISH_TOOL, {"submission": BENIGN_REPORT}, state="1: no writer -> refutes"
+    )
+    assert isinstance(review, Review)
+
+    refusal = investigation.after_review(review, rated("not_shown"))
+    event = json.loads(path.read_text().splitlines()[-1])
+    reporter = investigation.before_call(
+        FINISH_TOOL, {"submission": BENIGN_REPORT}, state="1: still no writer -> cannot check"
+    )
+
+    assert isinstance(refusal, LocalAnswer)
+    assert (
+        "1. Who wrote the script. (not_shown: The writer is null.)" in (refusal.feedback["message"])
+    )
+    assert event["kind"] == "answers_refused"
+    assert isinstance(reporter, Review)
+    assert reporter.role == "reporter"
+    request = json.loads(reporter.messages[-1]["content"])
+    assert request["challenge"]["answers"] == "1: still no writer -> cannot check"
+
+
+@pytest.mark.parametrize(
+    ("report", "reply", "error"),
+    [
+        (REPORT, None, None),
+        (BENIGN_REPORT, None, "NextStepRequestError: timeout"),
+    ],
+    ids=["malicious-is-not-reviewed", "failed-review"],
+)
+def test_a_malicious_report_or_a_failed_review_goes_straight_to_the_reporter(
+    report: dict[str, Any], reply: AnswerReview | None, error: str | None
+) -> None:
+    """The review never holds a report back: only a benign one is reviewed, and a failed
+    review lets it through."""
+    investigation = challenged_investigation()
+
+    decision = investigation.before_call(FINISH_TOOL, {"submission": report}, state="1: x")
+    if isinstance(decision, Review) and decision.role == "answer_review":
+        decision = investigation.after_review(decision, reply, error)
+
+    assert to_reporter(decision) == {"submission": report}
+
+
+def test_the_challengers_techniques_come_with_their_vocabulary_entries() -> None:
+    """Technique ids in the challenger's list are looked up locally, whatever text
+    surrounds them; other text is not, and ids past the fourth are dropped, not fatal."""
+    investigation = fetched_file_investigation()
+    review = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
+    assert isinstance(review, Review)
+    reply = Challenge.model_validate(
+        {
+            **challenge(seen("file-1", "path")).model_dump(),
+            "techniques": [
+                "t1021.006 Windows Remote Management",
+                "remote shell",
+                "T1059.001",
+                "T1003",
+                "T1078",
+            ],
+        }
+    )
+
+    answer = investigation.after_review(review, reply)
+
+    found = {entry["id"] for entry in answer.feedback["challenge"]["knowledge"]}
+    assert found == {"T1021.006", "T1059.001", "T1003"}
+
+
+def test_a_check_the_review_leaves_unrated_is_unsettled() -> None:
+    """A review that skips a check, or numbers it wrongly, does not settle it."""
+    investigation = challenged_investigation()
+    review = investigation.before_call(
+        FINISH_TOOL, {"submission": BENIGN_REPORT}, state="1: no writer -> refutes"
+    )
+    assert isinstance(review, Review)
+    misnumbered = AnswerReview.model_validate(
+        {"checks": [{"n": 2, "outcome": "refuted", "why": "Fine."}]}
+    )
+
+    refusal = investigation.after_review(review, misnumbered)
+
+    assert isinstance(refusal, LocalAnswer)
+    assert "did not rate this answer" in refusal.feedback["message"]
+
+
+def test_answers_survive_a_refusal_until_the_next_report_gives_new_ones() -> None:
+    """A report after the refusal without a state keeps the answers already given."""
+    investigation = challenged_investigation()
+    review = investigation.before_call(
+        FINISH_TOOL, {"submission": BENIGN_REPORT}, state="1: no writer -> refutes"
+    )
+    assert isinstance(review, Review)
+    investigation.after_review(review, rated("not_shown"))
+
+    reporter = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
+
+    assert isinstance(reporter, Review)
+    request = json.loads(reporter.messages[-1]["content"])
+    assert request["challenge"]["answers"] == "1: no writer -> refutes"

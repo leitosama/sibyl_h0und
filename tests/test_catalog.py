@@ -197,13 +197,28 @@ def test_challenge_schema_accepts_one_to_three_checks_of_the_given_tools() -> No
     }
     report = {"tool": "finish_investigation", "submission": {"verdict": "benign", "reasoning": "x"}}
 
+    def challenge(checks: list[dict[str, object]]) -> dict[str, object]:
+        return {"hypothesis": "Lateral movement.", "checks": checks, "techniques": ["T1021.006"]}
+
     assert response_format["json_schema"]["strict"] is True
-    assert validator.is_valid({"hypothesis": "Lateral movement.", "checks": [check, seen]})
-    assert not validator.is_valid({"hypothesis": "x", "checks": []})
-    assert not validator.is_valid({"hypothesis": "x", "checks": [check] * 4})
-    assert not validator.is_valid(
-        {"hypothesis": "x", "checks": [{**check, "source": {"call": report}}]}
-    )
+    assert validator.is_valid(challenge([check, seen]))
+    assert not validator.is_valid(challenge([]))
+    assert not validator.is_valid(challenge([check] * 4))
+    assert not validator.is_valid(challenge([{**check, "source": {"call": report}}]))
+
+
+def test_answer_review_schema_rates_each_check_with_one_of_three_outcomes() -> None:
+    """The answer review returns, per numbered check, refuted, confirmed or not shown."""
+    response_format = catalog_of(
+        {"name": "finish_investigation", "parameters": FINISH_PARAMETERS}
+    ).answer_review_format()
+    validator = Draft202012Validator(schema_of(response_format))
+    rated = {"n": 1, "outcome": "not_shown", "why": "Creation time is null."}
+
+    assert response_format["json_schema"]["strict"] is True
+    assert validator.is_valid({"checks": [rated]})
+    assert not validator.is_valid({"checks": [{**rated, "outcome": "unclear"}]})
+    assert not validator.is_valid({"checks": []})
 
 
 def test_report_schema_is_one_call_of_the_report_tool_with_its_own_arguments() -> None:

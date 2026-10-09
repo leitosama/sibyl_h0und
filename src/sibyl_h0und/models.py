@@ -7,6 +7,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    field_validator,
 )
 
 
@@ -17,6 +18,10 @@ class StrictModel(BaseModel):
 
 
 ToolReasoning = Annotated[str, Field(min_length=1, max_length=4096)]
+# Technique ids a challenge keeps; more are cut, not rejected (ADR 0028).
+MAX_CHALLENGE_TECHNIQUES = 4
+# Checks a challenge, and so its answer review, holds at most.
+MAX_CHALLENGE_CHECKS = 3
 PropertyFieldName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 EntitySearchType = Literal[
@@ -395,7 +400,41 @@ class Challenge(BaseModel):
     hypothesis: str = Field(
         min_length=1, description="The strongest attack reading of the same evidence."
     )
-    checks: list[ChallengeCheck] = Field(min_length=1, max_length=3)
+    checks: list[ChallengeCheck] = Field(min_length=1, max_length=MAX_CHALLENGE_CHECKS)
+    techniques: list[str] = Field(
+        default_factory=list,
+        description="Up to 4 MITRE ATT&CK technique ids of the hypothesis, such as T1021.006.",
+    )
+
+    @field_validator("techniques")
+    @classmethod
+    def _first_techniques(cls, value: list[str]) -> list[str]:
+        """Keep the first ids: one too many must not cost the whole challenge."""
+        return value[:MAX_CHALLENGE_TECHNIQUES]
+
+
+class CheckOutcome(BaseModel):
+    """How the investigation's answer to one numbered check stands (ADR 0028)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    n: int = Field(ge=1, description="Number of the check.")
+    outcome: Literal["refuted", "confirmed", "not_shown"] = Field(
+        description=(
+            "refuted: the answer reports the observed value of the named fact and it meets "
+            "refuted_if; confirmed: the value meets confirms_if; not_shown: the answer does "
+            "not report that fact's value."
+        )
+    )
+    why: str = Field(min_length=1, description="One sentence: the value given and how it stands.")
+
+
+class AnswerReview(BaseModel):
+    """A review of the investigation's answers to the challenger's checks (ADR 0028)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    checks: list[CheckOutcome] = Field(min_length=1, max_length=MAX_CHALLENGE_CHECKS)
 
 
 def _drop_nulls(value: Any) -> Any:

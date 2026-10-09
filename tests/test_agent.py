@@ -18,7 +18,7 @@ from sibyl_h0und.agent import SYSTEM_PROMPT, SimpleSGRAgent
 from sibyl_h0und.catalog import FINISH_TOOL
 from sibyl_h0und.investigation import Send
 from sibyl_h0und.llm import NextStepRequestError
-from sibyl_h0und.models import PRACTICE_ARGUMENT_MODELS, Challenge, NextStep, ToolCall
+from sibyl_h0und.models import PRACTICE_ARGUMENT_MODELS, AnswerReview, Challenge, NextStep, ToolCall
 from sibyl_h0und.replay import load_tasks
 from sibyl_h0und.side_replay import load_cases, side_turn
 from sibyl_h0und.trace import TaskTrace
@@ -599,3 +599,38 @@ def test_the_harness_replays_the_reporter_turn_as_the_agent_asked_it(tmp_path: P
     assert json.loads(live[-1]["content"])["challenge"]["answers"] == CHECK_ANSWERS
     assert replay_llm.side_requests["reporter"] == llm.side_requests["reporter"]
     assert answer == Send({"submission": rewrite})
+
+
+def test_a_refused_answer_is_traced_and_the_reporter_replay_follows_it(tmp_path: Path) -> None:
+    """The answer review sends the benign report back once; the next goes to the reporter,
+    and the harness, replaying the trace, reaches the same reporter turn."""
+    answered = benign_finish_step("entity-1", "pid").model_copy(
+        update={"current_state": CHECK_ANSWERS}
+    )
+    unsettled = AnswerReview.model_validate(
+        {
+            "checks": [
+                {"n": 1, "outcome": "not_shown", "why": "No logon is named."},
+                {"n": 2, "outcome": "refuted", "why": "pid 42."},
+            ]
+        }
+    )
+    report = ToolCall.model_validate(
+        {"tool": FINISH_TOOL, "submission": answered.function.arguments["submission"]}
+    )
+    again = answered.model_copy(update={"current_state": "1: a local logon -> refutes."})
+    llm, session = challenged_run(
+        tmp_path,
+        [get_entity_step("entity-1"), benign_finish_step("entity-1", "pid"), answered, again],
+        reports=(unsettled, report),
+    )
+
+    (case,) = load_cases(tmp_path / "traces", role="reporter")
+    replay_llm = FakeStepClient([], reports=(report,))
+    asyncio.run(side_turn(case, replay_llm))
+    (reviewed,) = load_cases(tmp_path / "traces", role="answer_review")
+
+    assert [name for name, _ in session.calls] == ["get_entity", FINISH_TOOL]
+    assert "No logon is named." in llm.requests[3][-1]["content"]
+    assert replay_llm.side_requests["reporter"] == llm.side_requests["reporter"]
+    assert json.loads(reviewed.review.messages[-1]["content"])["answers"] == CHECK_ANSWERS

@@ -81,6 +81,7 @@ class Task:
         self.number, self.id = number, task_id[:8]
         self.verdict = "?"
         self.challenged = self.rejected = self.refused = self.tool_errors = 0
+        self.answers_refused = 0
         self.llm_errors = 0
         self.reporter = "none"
         self.fallback: str | None = None
@@ -103,6 +104,8 @@ class Task:
             self.refused += 1
         elif kind == "benign_challenged":
             self.challenged += 1
+        elif kind == "answers_refused":
+            self.answers_refused += 1
         elif kind == "report_written":
             self.fallback = event.get("fallback")
             self.reporter = reporter_change(payload, self.fallback)
@@ -127,7 +130,8 @@ def task_line(task: Task, end: dict[str, Any]) -> tuple[str, dict[str, float]]:
     numbers = (
         f"Q={q:.2f} E={e:.2f} score={row['score']:.2f} reward={row['reward']:.0f} "
         f"calls={row['calls']} llm={row['llm']} llm_s={row['llm_s']:.0f} "
-        f"challenged={task.challenged} reporter={task.reporter} fallback={task.fallback} "
+        f"challenged={task.challenged} answers_refused={task.answers_refused} "
+        f"reporter={task.reporter} fallback={task.fallback} "
         f"rejected={task.rejected} refused={task.refused} tool_errors={task.tool_errors} "
         f"llm_errors={task.llm_errors} end={end.get('completion_reason')} "
         f"error={end.get('error')}"
