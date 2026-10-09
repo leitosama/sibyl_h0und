@@ -1,0 +1,1079 @@
+{
+  "entities": [
+    {
+      "id": "54f2c381-91b8-5af9-bbeb-0a4582b2ae02",
+      "type": "host",
+      "properties": {
+        "hostname": "DESKTOP-7F3K9Q2",
+        "ad_object_id": null,
+        "platform": "windows",
+        "os": null,
+        "os_version": null,
+        "ip": "10.45.200.50",
+        "ip_addresses": null,
+        "mac_addresses": null,
+        "architecture": null,
+        "domain": null,
+        "role": "workstation",
+        "is_virtual_machine": null,
+        "boot_time": null
+      },
+      "host_id": null,
+      "timestamps": []
+    },
+    {
+      "id": "67ba75fb-76b7-593a-96b2-e42d7f348ffe",
+      "type": "host",
+      "properties": {
+        "hostname": "NB-AIVANOVA",
+        "ad_object_id": "0e3ab56f-96a7-584b-81fe-f51b38479451",
+        "platform": "windows",
+        "os": "Windows 11 Enterprise",
+        "os_version": "10.0 (26100)",
+        "ip": "10.45.50.102",
+        "ip_addresses": null,
+        "mac_addresses": null,
+        "architecture": null,
+        "domain": "corp.local",
+        "role": "workstation",
+        "is_virtual_machine": null,
+        "boot_time": null
+      },
+      "host_id": null,
+      "timestamps": [
+        "2024-06-12T00:00:00+00:00",
+        "2024-06-12T09:00:07+00:00"
+      ]
+    },
+    {
+      "id": "70415d51-3f2b-583b-96ed-cb9406a950a8",
+      "type": "host",
+      "properties": {
+        "hostname": "C2",
+        "ad_object_id": null,
+        "platform": "external",
+        "os": null,
+        "os_version": null,
+        "ip": "154.89.152.59",
+        "ip_addresses": null,
+        "mac_addresses": null,
+        "architecture": null,
+        "domain": null,
+        "role": "external",
+        "is_virtual_machine": null,
+        "boot_time": null
+      },
+      "host_id": null,
+      "timestamps": []
+    },
+    {
+      "id": "830ce742-9f44-5e2f-b91a-0a79d9f36d91",
+      "type": "windows_user",
+      "properties": {
+        "sid": "S-1-5-21-1443991235-1188304862-3207093139-4501",
+        "ad_object_id": "4a983190-a4e9-5165-9f41-330d03b09579",
+        "username": "a.ivanova",
+        "domain": "CORP",
+        "account_type": "domain",
+        "session_type": null,
+        "is_privileged": null,
+        "is_service_account": null,
+        "privileges": null,
+        "group_memberships": [
+          "Domain Users",
+          "Accounting"
+        ]
+      },
+      "host_id": null,
+      "timestamps": [
+        "2024-06-12T09:00:07+00:00"
+      ]
+    },
+    {
+      "id": "3a7e1962-c6ff-5239-a06c-503e3afc583b",
+      "type": "windows_user",
+      "properties": {
+        "sid": "S-1-5-18",
+        "ad_object_id": null,
+        "username": "SYSTEM",
+        "domain": "NT AUTHORITY",
+        "account_type": "builtin",
+        "session_type": null,
+        "is_privileged": null,
+        "is_service_account": null,
+        "privileges": null,
+        "group_memberships": null
+      },
+      "host_id": null,
+      "timestamps": [
+        "2024-06-12T00:00:00+00:00"
+      ]
+    },
+    {
+      "id": "05329170-1a68-55fd-ab5d-14a2bf260f1a",
+      "type": "windows_user",
+      "properties": {
+        "sid": "S-1-5-20",
+        "ad_object_id": null,
+        "username": "NETWORK SERVICE",
+        "domain": "NT AUTHORITY",
+        "account_type": "builtin",
+        "session_type": null,
+        "is_privileged": null,
+        "is_service_account": null,
+        "privileges": null,
+        "group_memberships": null
+      },
+      "host_id": null,
+      "timestamps": [
+        "2024-06-12T00:00:00+00:00"
+      ]
+    },
+    {
+      "id": "f059c45f-df86-5bf4-8dff-22752f66d6f0",
+      "type": "windows_process",
+      "properties": {
+        "pid": 980,
+        "parent_pid": null,
+        "parent_image": null,
+        "image_path": "C:\\Windows\\System32\\svchost.exe",
+        "cmdline": "C:\\Windows\\System32\\svchost.exe -k termsvcs -s TermService",
+        "cwd": "C:\\Windows\\system32\\",
+        "powershell_host": null,
+        "powershell_version": null,
+        "user_sid": "S-1-5-20",
+        "user": "NT AUTHORITY\\NETWORK SERVICE",
+        "integrity_level": "system",
+        "session_id": 0,
+        "logon_id": "0x3e4",
+        "is_elevated": null,
+        "sha256": "1222A44A5FDB4EFDE4DFCB41093648627950E7EC02D8667F1C26CCAE31D922E2",
+        "sha1": "0BAC26FCA769FBECAB983E3CFBA95140D55E0855",
+        "md5": "07FE1BE55D1049C7B48E270C466502D4",
+        "original_filename": null,
+        "digital_signature": null,
+        "signed": true,
+        "signer": "Microsoft Windows",
+        "company": null,
+        "product": null,
+        "file_description": "Host Process for Windows Services",
+        "file_version": "10.0.26100.8737 (WinBuild.160101.0800)",
+        "token_privileges": null,
+        "start_time": null,
+        "end_time": null,
+        "loaded_modules": null
+      },
+      "host_id": "67ba75fb-76b7-593a-96b2-e42d7f348ffe",
+      "timestamps": [
+        "2024-06-12T09:00:02+00:00"
+      ]
+    },
+    {
+      "id": "277be7a1-0a6d-57df-8e8e-bcb282bfea16",
+      "type": "windows_process",
+      "properties": {
+        "pid": 1288,
+        "parent_pid": null,
+        "parent_image": null,
+        "image_path": "C:\\Windows\\System32\\smss.exe",
+        "cmdline": "C:\\Windows\\System32\\smss.exe",
+        "cwd": "C:\\Windows\\system32\\",
+        "powershell_host": null,
+        "powershell_version": null,
+        "user_sid": "S-1-5-18",
+        "user": "NT AUTHORITY\\SYSTEM",
+        "integrity_level": "system",
+        "session_id": 0,
+        "logon_id": "0x3e7",
+        "is_elevated": null,
+        "sha256": "56AFE5133FDC5806EC6B19436F7B55F1499CFC94619740C171424FBCF7808FD3",
+        "sha1": "53311CBDE782DA05C8EF97D7BC40D768E3A3EA64",
+        "md5": "2C3F91BB4C0994A7B36ED0B6B14EC9C7",
+        "original_filename": "smss.exe",
+        "digital_signature": null,
+        "signed": true,
+        "signer": "Microsoft Windows",
+        "company": "Microsoft Corporation",
+        "product": "Microsoft® Windows® Operating System",
+        "file_description": "Windows Session Manager",
+        "file_version": "10.0.19041.964 (WinBuild.160101.0800)",
+        "token_privileges": null,
+        "start_time": null,
+        "end_time": null,
+        "loaded_modules": null
+      },
+      "host_id": "67ba75fb-76b7-593a-96b2-e42d7f348ffe",
+      "timestamps": [
+        "2024-06-12T09:00:05+00:00"
+      ]
+    },
+    {
+      "id": "a9c3d363-1639-5d08-a305-39d7bf971e0e",
+      "type": "windows_process",
+      "properties": {
+        "pid": 2404,
+        "parent_pid": 1288,
+        "parent_image": "C:\\Windows\\System32\\smss.exe",
+        "image_path": "C:\\Windows\\System32\\smss.exe",
+        "cmdline": "\\SystemRoot\\System32\\smss.exe 00000000 0000003c ",
+        "cwd": "C:\\Windows\\system32\\",
+        "powershell_host": null,
+        "powershell_version": null,
+        "user_sid": "S-1-5-18",
+        "user": "NT AUTHORITY\\SYSTEM",
+        "integrity_level": "system",
+        "session_id": 2,
+        "logon_id": "0x3e7",
+        "is_elevated": null,
+        "sha256": "56AFE5133FDC5806EC6B19436F7B55F1499CFC94619740C171424FBCF7808FD3",
+        "sha1": "53311CBDE782DA05C8EF97D7BC40D768E3A3EA64",
+        "md5": "2C3F91BB4C0994A7B36ED0B6B14EC9C7",
+        "original_filename": "smss.exe",
+        "digital_signature": null,
+        "signed": true,
+        "signer": "Microsoft Windows",
+        "company": "Microsoft Corporation",
+        "product": "Microsoft® Windows® Operating System",
+        "file_description": "Windows Session Manager",
+        "file_version": "10.0.19041.964 (WinBuild.160101.0800)",
+        "token_privileges": null,
+        "start_time": "2024-06-12T09:00:05+00:00",
+        "end_time": null,
+        "loaded_modules": null
+      },
+      "host_id": "67ba75fb-76b7-593a-96b2-e42d7f348ffe",
+      "timestamps": [
+        "2024-06-12T09:00:05+00:00",
+        "2024-06-12T09:00:06+00:00"
+      ]
+    },
+    {
+      "id": "53394002-7037-5d1f-adfd-b8fdb4554686",
+      "type": "windows_process",
+      "properties": {
+        "pid": 1520,
+        "parent_pid": 2404,
+        "parent_image": "C:\\Windows\\System32\\smss.exe",
+        "image_path": "C:\\Windows\\System32\\winlogon.exe",
+        "cmdline": "winlogon.exe",
+        "cwd": "C:\\Windows\\system32\\",
+        "powershell_host": null,
+        "powershell_version": null,
+        "user_sid": "S-1-5-18",
+        "user": "NT AUTHORITY\\SYSTEM",
+        "integrity_level": "system",
+        "session_id": 2,
+        "logon_id": "0x3e7",
+        "is_elevated": null,
+        "sha256": "D90D8D9A6B60071347891B312DF0AE13E5CF40BC554EC75BCA2F2444C589F1E5",
+        "sha1": "8399805A900B86D971E371714785C17000D17E6C",
+        "md5": "F8B41A1B3E569E7E6F990567F21DCE97",
+        "original_filename": "WINLOGON.EXE",
+        "digital_signature": null,
+        "signed": true,
+        "signer": "Microsoft Windows",
+        "company": "Microsoft Corporation",
+        "product": "Microsoft® Windows® Operating System",
+        "file_description": "Windows Logon Application",
+        "file_version": "10.0.19041.1865 (WinBuild.160101.0800)",
+        "token_privileges": null,
+        "start_time": "2024-06-12T09:00:06+00:00",
+        "end_time": null,
+        "loaded_modules": null
+      },
+      "host_id": "67ba75fb-76b7-593a-96b2-e42d7f348ffe",
+      "timestamps": [
+        "2024-06-12T09:00:06+00:00",
+        "2024-06-12T09:00:08+00:00"
+      ]
+    },
+    {
+      "id": "a40f537b-a7b2-505c-960d-00028d49a9ed",
+      "type": "windows_process",
+      "properties": {
+        "pid": 4312,
+        "parent_pid": 1520,
+        "parent_image": "C:\\Windows\\System32\\winlogon.exe",
+        "image_path": "C:\\Windows\\System32\\userinit.exe",
+        "cmdline": "C:\\Windows\\system32\\userinit.exe",
+        "cwd": "C:\\Windows\\system32\\",
+        "powershell_host": null,
+        "powershell_version": null,
+        "user_sid": "S-1-5-21-1443991235-1188304862-3207093139-4501",
+        "user": "CORP\\a.ivanova",
+        "integrity_level": "medium",
+        "session_id": 2,
+        "logon_id": "0x7a2c4",
+        "is_elevated": null,
+        "sha256": "03C963391D522A764136008A878369C07FCDF05083274A8A9F27348A14E13D55",
+        "sha1": "F2460307D8F0C264DF4F101B5ADAF6927D4116CF",
+        "md5": "47BBDBE152A597F4A840C5269ED961E8",
+        "original_filename": "USERINIT.EXE",
+        "digital_signature": null,
+        "signed": true,
+        "signer": "Microsoft Windows",
+        "company": "Microsoft Corporation",
+        "product": "Microsoft® Windows® Operating System",
+        "file_description": "Userinit Logon Application",
+        "file_version": "10.0.19041.1741 (WinBuild.160101.0800)",
+        "token_privileges": null,
+        "start_time": "2024-06-12T09:00:08+00:00",
+        "end_time": null,
+        "loaded_modules": null
+      },
+      "host_id": "67ba75fb-76b7-593a-96b2-e42d7f348ffe",
+      "timestamps": [
+        "2024-06-12T09:00:08+00:00",
+        "2024-06-12T09:00:10+00:00"
+      ]
+    },
+    {
+      "id": "8e86f2e0-394d-50ed-8363-7744ee708da0",
+      "type": "windows_process",
+      "properties": {
+        "pid": 4360,
+        "parent_pid": 4312,
+        "parent_image": "C:\\Windows\\System32\\userinit.exe",
+        "image_path": "C:\\Windows\\explorer.exe",
+        "cmdline": "C:\\Windows\\Explorer.EXE",
+        "cwd": "C:\\Users\\a.ivanova\\",
+        "powershell_host": null,
+        "powershell_version": null,
+        "user_sid": "S-1-5-21-1443991235-1188304862-3207093139-4501",
+        "user": "CORP\\a.ivanova",
+        "integrity_level": "medium",
+        "session_id": 2,
+        "logon_id": "0x7a2c4",
+        "is_elevated": null,
+        "sha256": "A5C7C78F380354CDF4A226DF8988A9CF3422BF052542368B6B2FB29DF5F7916B",
+        "sha1": "BCC5AF9A5B7D8172F9C5FD6600D65DC264025B7E",
+        "md5": "8C2702FDBBC44E9C4950E54D55D3957E",
+        "original_filename": "EXPLORER.EXE",
+        "digital_signature": null,
+        "signed": true,
+        "signer": "Microsoft Windows",
+        "company": "Microsoft Corporation",
+        "product": "Microsoft® Windows® Operating System",
+        "file_description": "Windows Explorer",
+        "file_version": "10.0.19041.1949 (WinBuild.160101.0800)",
+        "token_privileges": null,
+        "start_time": "2024-06-12T09:00:10+00:00",
+        "end_time": null,
+        "loaded_modules": null
+      },
+      "host_id": "67ba75fb-76b7-593a-96b2-e42d7f348ffe",
+      "timestamps": [
+        "2024-06-12T09:00:10+00:00",
+        "2024-06-12T09:02:30+00:00",
+        "2024-06-12T09:03:00+00:00"
+      ]
+    },
+    {
+      "id": "befe11af-28cd-5fde-8f4e-311febd53eac",
+      "type": "windows_process",
+      "properties": {
+        "pid": 6120,
+        "parent_pid": 4360,
+        "parent_image": "C:\\Windows\\explorer.exe",
+        "image_path": "C:\\Users\\a.ivanova\\Desktop\\Diagnosis.exe",
+        "cmdline": "C:\\Users\\a.ivanova\\Desktop\\Diagnosis.exe",
+        "cwd": "C:\\Users\\a.ivanova\\Desktop\\",
+        "powershell_host": null,
+        "powershell_version": null,
+        "user_sid": "S-1-5-21-1443991235-1188304862-3207093139-4501",
+        "user": "CORP\\a.ivanova",
+        "integrity_level": "medium",
+        "session_id": 2,
+        "logon_id": "0x7a2c4",
+        "is_elevated": null,
+        "sha256": "c3f5a9b1d2e47608a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5e6f7081",
+        "sha1": "E2A20F58FE089BFC697039885BA84021C0C0D134",
+        "md5": "BE47FB0D29D50FA051A165691EF021BB",
+        "original_filename": null,
+        "digital_signature": null,
+        "signed": null,
+        "signer": null,
+        "company": null,
+        "product": null,
+        "file_description": null,
+        "file_version": null,
+        "token_privileges": null,
+        "start_time": "2024-06-12T09:03:00+00:00",
+        "end_time": null,
+        "loaded_modules": null
+      },
+      "host_id": "67ba75fb-76b7-593a-96b2-e42d7f348ffe",
+      "timestamps": [
+        "2024-06-12T09:03:00+00:00",
+        "2024-06-12T09:03:02+00:00"
+      ]
+    },
+    {
+      "id": "8c7ab0d7-74a2-5e3b-a243-5b8dfe155caa",
+      "type": "windows_file",
+      "properties": {
+        "path": "C:\\Users\\a.ivanova\\Desktop\\Diagnosis.exe",
+        "size_bytes": null,
+        "sha256": "c3f5a9b1d2e47608a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5e6f7081",
+        "sha1": "E2A20F58FE089BFC697039885BA84021C0C0D134",
+        "md5": "BE47FB0D29D50FA051A165691EF021BB",
+        "file_type": "executable",
+        "path_type": "local",
+        "remote_host": null,
+        "unc_path": null,
+        "zone_identifier": null,
+        "owner_sid": null,
+        "created_at": null,
+        "modification_time": null,
+        "ads_name": null,
+        "signed": false,
+        "lnk_target_cmdline": null,
+        "script_text": null,
+        "is_executable": true
+      },
+      "host_id": "67ba75fb-76b7-593a-96b2-e42d7f348ffe",
+      "timestamps": [
+        "2024-06-12T09:02:30+00:00"
+      ]
+    },
+    {
+      "id": "4d760b1b-0b84-500f-a891-f144ebd55a5d",
+      "type": "network_connection",
+      "properties": {
+        "src_ip": "10.45.200.50",
+        "src_port": 49153,
+        "dst_ip": "10.45.50.102",
+        "dst_port": 3389,
+        "fqdn": null,
+        "http": null,
+        "protocol": "tcp",
+        "direction": "inbound",
+        "initiated": null,
+        "community_id": null,
+        "connection_state": null,
+        "timestamp": "2024-06-12T09:00:02+00:00",
+        "bytes_sent": null,
+        "bytes_received": null,
+        "socket_family": null,
+        "socket_type": null,
+        "resolution": "raw_ip",
+        "query_status": null,
+        "response_addresses": null,
+        "query_type": null,
+        "dns_timestamp": null,
+        "initiator_stack": null
+      },
+      "host_id": "54f2c381-91b8-5af9-bbeb-0a4582b2ae02",
+      "timestamps": [
+        "2024-06-12T09:00:02+00:00"
+      ]
+    },
+    {
+      "id": "57c95e94-bb01-5856-a031-2cdc39ab3070",
+      "type": "network_connection",
+      "properties": {
+        "src_ip": "10.45.50.102",
+        "src_port": 50110,
+        "dst_ip": "154.89.152.59",
+        "dst_port": 443,
+        "fqdn": null,
+        "http": null,
+        "protocol": "tcp",
+        "direction": "outbound",
+        "initiated": null,
+        "community_id": null,
+        "connection_state": null,
+        "timestamp": "2024-06-12T09:03:02+00:00",
+        "bytes_sent": null,
+        "bytes_received": null,
+        "socket_family": null,
+        "socket_type": null,
+        "resolution": "raw_ip",
+        "query_status": null,
+        "response_addresses": null,
+        "query_type": null,
+        "dns_timestamp": null,
+        "initiator_stack": null
+      },
+      "host_id": "70415d51-3f2b-583b-96ed-cb9406a950a8",
+      "timestamps": [
+        "2024-06-12T09:03:02+00:00"
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "id": "c30b32fd-265e-56c7-b913-34766d27fd35",
+      "type": "hosts",
+      "source_id": "67ba75fb-76b7-593a-96b2-e42d7f348ffe",
+      "target_id": "f059c45f-df86-5bf4-8dff-22752f66d6f0",
+      "timestamp": null,
+      "log_sources": [
+        "ground_truth_only"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "9633a2bf-6fcf-5688-88d4-fec3cd9793c6",
+      "type": "hosts",
+      "source_id": "67ba75fb-76b7-593a-96b2-e42d7f348ffe",
+      "target_id": "277be7a1-0a6d-57df-8e8e-bcb282bfea16",
+      "timestamp": null,
+      "log_sources": [
+        "ground_truth_only"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "11468353-f3b1-5750-b228-923f8d3ba2bb",
+      "type": "hosts",
+      "source_id": "67ba75fb-76b7-593a-96b2-e42d7f348ffe",
+      "target_id": "a9c3d363-1639-5d08-a305-39d7bf971e0e",
+      "timestamp": null,
+      "log_sources": [
+        "Sysmon-1",
+        "WinEvt-4688"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "f4bbd54a-aac6-563f-a5bf-2b62d9ee5817",
+      "type": "hosts",
+      "source_id": "67ba75fb-76b7-593a-96b2-e42d7f348ffe",
+      "target_id": "53394002-7037-5d1f-adfd-b8fdb4554686",
+      "timestamp": null,
+      "log_sources": [
+        "Sysmon-1",
+        "WinEvt-4688"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "1bb1f32b-fa1d-501f-8296-740a6587bcd6",
+      "type": "hosts",
+      "source_id": "67ba75fb-76b7-593a-96b2-e42d7f348ffe",
+      "target_id": "a40f537b-a7b2-505c-960d-00028d49a9ed",
+      "timestamp": null,
+      "log_sources": [
+        "Sysmon-1",
+        "WinEvt-4688"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "25fbb6bd-6a16-557f-a2e3-545acd46dd01",
+      "type": "hosts",
+      "source_id": "67ba75fb-76b7-593a-96b2-e42d7f348ffe",
+      "target_id": "8e86f2e0-394d-50ed-8363-7744ee708da0",
+      "timestamp": null,
+      "log_sources": [
+        "Sysmon-1",
+        "WinEvt-4688"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "575565ce-4a1b-5210-83a8-223b2e4493a0",
+      "type": "hosts",
+      "source_id": "67ba75fb-76b7-593a-96b2-e42d7f348ffe",
+      "target_id": "befe11af-28cd-5fde-8f4e-311febd53eac",
+      "timestamp": null,
+      "log_sources": [
+        "Sysmon-1",
+        "WinEvt-4688"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "cb4349df-4f56-5e7b-92cb-af637e67a32f",
+      "type": "hosts",
+      "source_id": "67ba75fb-76b7-593a-96b2-e42d7f348ffe",
+      "target_id": "8c7ab0d7-74a2-5e3b-a243-5b8dfe155caa",
+      "timestamp": null,
+      "log_sources": [
+        "Sysmon-11"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "bf4820f2-be07-515e-b2c4-ad9446a09aad",
+      "type": "hosts",
+      "source_id": "54f2c381-91b8-5af9-bbeb-0a4582b2ae02",
+      "target_id": "4d760b1b-0b84-500f-a891-f144ebd55a5d",
+      "timestamp": null,
+      "log_sources": [
+        "ground_truth_only"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "3b228587-e463-5ce7-8a1f-7f01e38e8dd8",
+      "type": "hosts",
+      "source_id": "70415d51-3f2b-583b-96ed-cb9406a950a8",
+      "target_id": "57c95e94-bb01-5856-a031-2cdc39ab3070",
+      "timestamp": null,
+      "log_sources": [
+        "ground_truth_only"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "70922e40-c090-5f8a-af59-11a9543669cf",
+      "type": "runs_process",
+      "source_id": "05329170-1a68-55fd-ab5d-14a2bf260f1a",
+      "target_id": "f059c45f-df86-5bf4-8dff-22752f66d6f0",
+      "timestamp": null,
+      "log_sources": [
+        "ground_truth_only"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "22e0c758-1154-5e08-a3ec-fbb657fff7f5",
+      "type": "runs_process",
+      "source_id": "3a7e1962-c6ff-5239-a06c-503e3afc583b",
+      "target_id": "277be7a1-0a6d-57df-8e8e-bcb282bfea16",
+      "timestamp": null,
+      "log_sources": [
+        "ground_truth_only"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "228aaf84-0ba6-56b1-a9d1-613b19ae72a6",
+      "type": "runs_process",
+      "source_id": "3a7e1962-c6ff-5239-a06c-503e3afc583b",
+      "target_id": "a9c3d363-1639-5d08-a305-39d7bf971e0e",
+      "timestamp": null,
+      "log_sources": [
+        "Sysmon-1",
+        "WinEvt-4688"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "d4db7ace-0901-5cec-b101-fb11d3f62dc5",
+      "type": "runs_process",
+      "source_id": "3a7e1962-c6ff-5239-a06c-503e3afc583b",
+      "target_id": "53394002-7037-5d1f-adfd-b8fdb4554686",
+      "timestamp": null,
+      "log_sources": [
+        "Sysmon-1",
+        "WinEvt-4688"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "11e4c6f2-afb2-5c40-89ba-62dfab0b291a",
+      "type": "runs_process",
+      "source_id": "830ce742-9f44-5e2f-b91a-0a79d9f36d91",
+      "target_id": "a40f537b-a7b2-505c-960d-00028d49a9ed",
+      "timestamp": null,
+      "log_sources": [
+        "Sysmon-1",
+        "WinEvt-4688"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "b2a0c6d9-2612-530e-bd76-c75f477aac82",
+      "type": "runs_process",
+      "source_id": "830ce742-9f44-5e2f-b91a-0a79d9f36d91",
+      "target_id": "8e86f2e0-394d-50ed-8363-7744ee708da0",
+      "timestamp": null,
+      "log_sources": [
+        "Sysmon-1",
+        "WinEvt-4688"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "e767a571-f99d-5a8e-b81f-234cedacc381",
+      "type": "runs_process",
+      "source_id": "830ce742-9f44-5e2f-b91a-0a79d9f36d91",
+      "target_id": "befe11af-28cd-5fde-8f4e-311febd53eac",
+      "timestamp": null,
+      "log_sources": [
+        "Sysmon-1",
+        "WinEvt-4688"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "a9c9c20d-8f3a-5521-9c57-dbec8cea1825",
+      "type": "logged_on_to",
+      "source_id": "830ce742-9f44-5e2f-b91a-0a79d9f36d91",
+      "target_id": "67ba75fb-76b7-593a-96b2-e42d7f348ffe",
+      "timestamp": "2024-06-12T09:00:07+00:00",
+      "log_sources": [
+        "WinEvt-4624"
+      ],
+      "properties": null,
+      "logon_properties": {
+        "logon_type": "remote_interactive",
+        "source_ip": "10.45.200.50",
+        "source_port": 49153,
+        "source_host": null,
+        "auth_package": null,
+        "source_logon_id": null,
+        "protocol": null,
+        "exe": null,
+        "terminal": null,
+        "auth_failed": null,
+        "explicit_credentials": null,
+        "logon_id": "0x7a2c4",
+        "linked_logon_id": null,
+        "elevated_token": null,
+        "status_code": null,
+        "pre_auth_type": null,
+        "kerberos_realm": null,
+        "impersonation_level": null,
+        "virtual_account": null,
+        "user_initiated": null
+      },
+      "access_properties": null
+    },
+    {
+      "id": "c0eb4217-94f6-5b7a-8e68-8e73621ebae2",
+      "type": "logged_on_to",
+      "source_id": "3a7e1962-c6ff-5239-a06c-503e3afc583b",
+      "target_id": "67ba75fb-76b7-593a-96b2-e42d7f348ffe",
+      "timestamp": "2024-06-12T00:00:00+00:00",
+      "log_sources": [
+        "ground_truth_only"
+      ],
+      "properties": null,
+      "logon_properties": {
+        "logon_type": "service",
+        "source_ip": null,
+        "source_port": null,
+        "source_host": null,
+        "auth_package": null,
+        "source_logon_id": null,
+        "protocol": null,
+        "exe": null,
+        "terminal": null,
+        "auth_failed": null,
+        "explicit_credentials": null,
+        "logon_id": "0x3e7",
+        "linked_logon_id": null,
+        "elevated_token": null,
+        "status_code": null,
+        "pre_auth_type": null,
+        "kerberos_realm": null,
+        "impersonation_level": null,
+        "virtual_account": null,
+        "user_initiated": null
+      },
+      "access_properties": null
+    },
+    {
+      "id": "0db7d702-ca85-56dc-8757-e9d3fc3e33ed",
+      "type": "logged_on_to",
+      "source_id": "05329170-1a68-55fd-ab5d-14a2bf260f1a",
+      "target_id": "67ba75fb-76b7-593a-96b2-e42d7f348ffe",
+      "timestamp": "2024-06-12T00:00:00+00:00",
+      "log_sources": [
+        "ground_truth_only"
+      ],
+      "properties": null,
+      "logon_properties": {
+        "logon_type": "service",
+        "source_ip": null,
+        "source_port": null,
+        "source_host": null,
+        "auth_package": null,
+        "source_logon_id": null,
+        "protocol": null,
+        "exe": null,
+        "terminal": null,
+        "auth_failed": null,
+        "explicit_credentials": null,
+        "logon_id": "0x3e4",
+        "linked_logon_id": null,
+        "elevated_token": null,
+        "status_code": null,
+        "pre_auth_type": null,
+        "kerberos_realm": null,
+        "impersonation_level": null,
+        "virtual_account": null,
+        "user_initiated": null
+      },
+      "access_properties": null
+    },
+    {
+      "id": "b3fca0cf-ad7c-51b2-ae0f-b8520c8841c1",
+      "type": "win_process_create",
+      "source_id": "277be7a1-0a6d-57df-8e8e-bcb282bfea16",
+      "target_id": "a9c3d363-1639-5d08-a305-39d7bf971e0e",
+      "timestamp": "2024-06-12T09:00:05+00:00",
+      "log_sources": [
+        "Sysmon-1",
+        "WinEvt-4688"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "b0877e97-2fd1-55dc-a006-00befdcdd9c2",
+      "type": "win_process_create",
+      "source_id": "a9c3d363-1639-5d08-a305-39d7bf971e0e",
+      "target_id": "53394002-7037-5d1f-adfd-b8fdb4554686",
+      "timestamp": "2024-06-12T09:00:06+00:00",
+      "log_sources": [
+        "Sysmon-1",
+        "WinEvt-4688"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "04eebdc8-f229-561d-84df-cf7032817be2",
+      "type": "win_process_create",
+      "source_id": "53394002-7037-5d1f-adfd-b8fdb4554686",
+      "target_id": "a40f537b-a7b2-505c-960d-00028d49a9ed",
+      "timestamp": "2024-06-12T09:00:08+00:00",
+      "log_sources": [
+        "Sysmon-1",
+        "WinEvt-4688"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "915cbaef-e4e8-5831-97f5-941c29ca94bb",
+      "type": "win_process_create",
+      "source_id": "a40f537b-a7b2-505c-960d-00028d49a9ed",
+      "target_id": "8e86f2e0-394d-50ed-8363-7744ee708da0",
+      "timestamp": "2024-06-12T09:00:10+00:00",
+      "log_sources": [
+        "Sysmon-1",
+        "WinEvt-4688"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "d45d1d43-bd96-5b1d-8a1b-c7d66f40da6f",
+      "type": "wrote_file",
+      "source_id": "8e86f2e0-394d-50ed-8363-7744ee708da0",
+      "target_id": "8c7ab0d7-74a2-5e3b-a243-5b8dfe155caa",
+      "timestamp": "2024-06-12T09:02:30+00:00",
+      "log_sources": [
+        "Sysmon-11",
+        "Sysmon-29"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "218a3b38-fc37-57c0-82ef-1dc50b7eefad",
+      "type": "win_process_create",
+      "source_id": "8e86f2e0-394d-50ed-8363-7744ee708da0",
+      "target_id": "befe11af-28cd-5fde-8f4e-311febd53eac",
+      "timestamp": "2024-06-12T09:03:00+00:00",
+      "log_sources": [
+        "Sysmon-1",
+        "WinEvt-4688"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "8a04934e-753f-5386-b311-6c4e269b69c5",
+      "type": "accepted_connection_from",
+      "source_id": "f059c45f-df86-5bf4-8dff-22752f66d6f0",
+      "target_id": "4d760b1b-0b84-500f-a891-f144ebd55a5d",
+      "timestamp": "2024-06-12T09:00:02+00:00",
+      "log_sources": [
+        "Sysmon-3"
+      ],
+      "properties": {},
+      "logon_properties": null,
+      "access_properties": null
+    },
+    {
+      "id": "49b60905-78a3-575c-bc18-cbaf7094873e",
+      "type": "connected_to",
+      "source_id": "befe11af-28cd-5fde-8f4e-311febd53eac",
+      "target_id": "57c95e94-bb01-5856-a031-2cdc39ab3070",
+      "timestamp": "2024-06-12T09:03:02+00:00",
+      "log_sources": [
+        "Sysmon-3"
+      ],
+      "properties": null,
+      "logon_properties": null,
+      "access_properties": null
+    }
+  ],
+  "context": {
+    "ti_hashes": [],
+    "ti_ips": [],
+    "logon_events": [],
+    "ad_directory": {
+      "id": "dcc66d34-38ea-5185-bef3-4a8bcfea3eed",
+      "domain": "corp.local",
+      "domain_sid": "S-1-5-21-1443991235-1188304862-3207093139",
+      "domain_controller_id": "eeefbe0b-7028-5f46-9956-a8279411b3dc",
+      "accounts": [
+        {
+          "id": "4a983190-a4e9-5165-9f41-330d03b09579",
+          "kind": "account",
+          "sam_account_name": "a.ivanova",
+          "object_sid": "S-1-5-21-1443991235-1188304862-3207093139-4501",
+          "type": "user",
+          "display_name": "Anna Ivanova",
+          "upn": "a.ivanova@corp.local",
+          "distinguished_name": "CN=Anna Ivanova,OU=Accounting,OU=Users,DC=corp,DC=local",
+          "description": "Accounts-payable clerk, Accounting department. Standard user; no administrative group membership.",
+          "enabled": true,
+          "created": null,
+          "modified": null,
+          "password_last_set": null,
+          "last_logon": "2024-06-12T09:00:07Z",
+          "account_expires": null,
+          "logon_count": null,
+          "admin_count": null,
+          "password_never_expires": null,
+          "logon_workstations": null,
+          "member_of_ids": [
+            "e4848f35-9dd8-5665-956d-438881b634e3",
+            "f7f92012-64ac-5a50-a58a-7dcdb6f6172d"
+          ],
+          "member_of_external_names": [],
+          "service_principal_names": [],
+          "department": "Accounting",
+          "title": "Accountant (Accounts Payable)",
+          "manager_id": null,
+          "manager_dn": null,
+          "managed_password_interval": null,
+          "principals_allowed_to_retrieve_password_ids": []
+        }
+      ],
+      "computers": [
+        {
+          "id": "0e3ab56f-96a7-584b-81fe-f51b38479451",
+          "kind": "computer",
+          "sam_account_name": "NB-AIVANOVA$",
+          "dns_hostname": "NB-AIVANOVA.corp.local",
+          "object_sid": "S-1-5-21-1443991235-1188304862-3207093139-4552",
+          "os": "Windows 11 Enterprise",
+          "os_version": "10.0 (26100)",
+          "distinguished_name": "CN=NB-AIVANOVA,OU=Workstations,DC=corp,DC=local",
+          "description": "Anna Ivanova's assigned desk workstation; the RDP target where the payload is dropped and run.",
+          "managed_by_id": null,
+          "managed_by_dn": null,
+          "created": null,
+          "last_logon": "2024-06-12T09:08:02Z",
+          "ip_address": "10.45.50.102",
+          "is_domain_controller": false,
+          "site": null,
+          "server_roles": []
+        },
+        {
+          "id": "eeefbe0b-7028-5f46-9956-a8279411b3dc",
+          "kind": "computer",
+          "sam_account_name": "DC4501$",
+          "dns_hostname": "DC4501.corp.local",
+          "object_sid": "S-1-5-21-1443991235-1188304862-3207093139-4553",
+          "os": "Windows Server 2022 Datacenter",
+          "os_version": "10.0 (20348)",
+          "distinguished_name": "CN=DC4501,OU=Domain Controllers,DC=corp,DC=local",
+          "description": "Domain controller - corp.local. Directory context: this is where the accounts above live; the scenario models no DC-side activity.",
+          "managed_by_id": null,
+          "managed_by_dn": null,
+          "created": null,
+          "last_logon": "2024-06-12T09:08:02Z",
+          "ip_address": "10.45.10.10",
+          "is_domain_controller": true,
+          "site": "Default-First-Site-Name",
+          "server_roles": [
+            "AD-Domain-Services",
+            "DNS"
+          ]
+        }
+      ],
+      "groups": [
+        {
+          "id": "e4848f35-9dd8-5665-956d-438881b634e3",
+          "kind": "group",
+          "name": "Domain Users",
+          "object_sid": "S-1-5-21-1443991235-1188304862-3207093139-513",
+          "distinguished_name": "CN=Domain Users,CN=Users,DC=corp,DC=local",
+          "description": "Default primary group for all domain user accounts.",
+          "member_ids": [
+            "4a983190-a4e9-5165-9f41-330d03b09579"
+          ],
+          "member_external_names": [],
+          "managed_by_id": null,
+          "managed_by_dn": null
+        },
+        {
+          "id": "f7f92012-64ac-5a50-a58a-7dcdb6f6172d",
+          "kind": "group",
+          "name": "Accounting",
+          "object_sid": "S-1-5-21-1443991235-1188304862-3207093139-4561",
+          "distinguished_name": "CN=Accounting,OU=Groups,DC=corp,DC=local",
+          "description": "Accounting department distribution/security group; grants access to finance file shares. No privileged rights.",
+          "member_ids": [
+            "4a983190-a4e9-5165-9f41-330d03b09579"
+          ],
+          "member_external_names": [],
+          "managed_by_id": null,
+          "managed_by_dn": null
+        }
+      ],
+      "ds_objects": []
+    },
+    "file_contents": [],
+    "decoded_payloads": [],
+    "change_records": [],
+    "dns_events": [],
+    "proxy_logs": [],
+    "hosts": [],
+    "driver_blocklist": [],
+    "patch_records": [],
+    "applocker_policies": [],
+    "email_events": []
+  }
+}
