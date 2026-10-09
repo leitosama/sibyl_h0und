@@ -223,7 +223,8 @@ class GraphLedger:
 
         A field is a dotted path from the object or from its `properties`,
         or else a bare key at any depth, as a report cites it. A field that
-        holds `null` is a fact too.
+        holds `null` is a fact too; the object's `id` and a whole nested object
+        are not.
 
         Args:
             object_id: Id of the object.
@@ -238,16 +239,20 @@ class GraphLedger:
         if node is None:
             return found
         for name in fields:
+            if name == "id":
+                continue
             for path in (name, f"properties.{name}"):
                 value: Any = node
                 for part in path.split("."):
                     value = value.get(part, _MISSING) if isinstance(value, dict) else _MISSING
                 if value is not _MISSING:
-                    found[name] = value
                     break
             else:
-                if (value := _find_key(node, name)) is not None:
-                    found[name] = value
+                value = _find_key(node, name)
+                if value is None:
+                    continue
+            if not isinstance(value, dict):
+                found[name] = value
         return found
 
     def _in_alert_text(self, value: str) -> bool:

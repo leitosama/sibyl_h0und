@@ -79,8 +79,7 @@ Your job is to argue the opposite verdict.
   relations not yet visited, entities never fetched.
 - An entity in the evidence is shown there in full: fetching it again shows nothing new.
   What it did that is not shown yet is behind its `unvisited_relation_ids`: open one of
-  them by its id, or search for the entity's id limited to one relation type. One more
-  relation of a kind already seen does not show a new fact either.
+  them. One more relation of a kind already seen does not show a new fact either.
 - Judge what each entity did, to what and from where, not what it is called. A familiar
   name, a signature, a usual parent or a plausible purpose does not refute an attack.
   An entity with many relations of which few were opened is a place an attack can hide.
@@ -144,7 +143,7 @@ REPORT_REPAIR = (
 )
 # What the challenger is told once when a check repeats a call (ADR 0025).
 CHALLENGE_REPAIR = (
-    "Some checks cannot be used: {problems} Fix them: cite a fact the evidence holds as "
+    "Some checks need a fix: {problems} Fix them: cite a fact the evidence holds as "
     "`seen`, or give a call that opens something still unvisited, such as one of an entity's "
     "`unvisited_relation_ids`. Return the whole challenge again as one JSON object matching "
     "the schema."
@@ -246,8 +245,10 @@ class Investigation:
         self._benign_challenged = False
         # The challenger's case the head was given, for the reporter.
         self._challenge_record: dict[str, Any] | None = None
-        # The head's answers to its checks, from the state of its latest report.
+        # The head's answers to its checks, from the state of its report the reporter gets.
         self._challenge_answers: str | None = None
+        # The challenger's case before its repair turn, kept if the repair gives nothing.
+        self._unrepaired: tuple[str, list[dict[str, Any]]] = ("", [])
         # Whether the report last sent is the reporter's rewrite of the head's.
         self._rewritten = False
         # Why the last report sent is the head's own, or `None` (ADR 0023).
@@ -298,9 +299,6 @@ class Investigation:
             A local answer, the prepared arguments to send, or the side turn
             to run before the call is answered.
         """
-        if tool == FINISH_TOOL and self._challenge_record is not None and state:
-            # The first report after the challenge answers it; a later one may only fix it.
-            self._challenge_answers = self._challenge_answers or state
         problem = None
         if tool in self.catalog:
             try:
@@ -379,6 +377,9 @@ class Investigation:
                 Challenge,
             )
         if tool == FINISH_TOOL and (report_format := self.catalog.report_format()) is not None:
+            if self._challenge_record is not None and state and self._challenge_answers is None:
+                # The first report after the challenge that is not refused answers it.
+                self._challenge_answers = state
             logger.info("Asking the reporter to write the report.")
             return Review(
                 REPORTER_ROLE, arguments, self._reporter_request(arguments), report_format, ToolCall
@@ -405,6 +406,7 @@ class Investigation:
         checks, problems = self._screen_checks(challenge) if challenge is not None else ([], [])
         if challenge is not None and problems and not review.repaired:
             logger.warning("Challenger checks need a repair ({}); asking once more.", problems)
+            self._unrepaired = (challenge.hypothesis, checks)
             messages = [
                 *review.messages,
                 {"role": "assistant", "content": render_json(challenge.model_dump())},
@@ -419,6 +421,9 @@ class Investigation:
                 repaired=True,
             )
         hypothesis = challenge.hypothesis if challenge is not None else ""
+        if review.repaired and not checks and self._unrepaired[1]:
+            # A failed repair does not cost the checks the first reply got right.
+            hypothesis, checks = self._unrepaired
         return self._challenge(review.arguments, hypothesis, checks, error)
 
     def _reporter_request(self, draft: dict[str, Any]) -> list[dict[str, Any]]:
@@ -607,17 +612,17 @@ class Investigation:
             source = check.source
             if isinstance(source, SeenSource):
                 fact = source.seen
-                values = self._ledger.property_values(fact.evidence_id, fact.property_fields)
                 if fact.evidence_id not in self._ledger.objects:
                     problems.append(
                         f"Check {number} cites {fact.evidence_id!r}, which is not in the evidence."
                     )
                     continue
-                if not values:
+                values = self._ledger.property_values(fact.evidence_id, fact.property_fields)
+                if missing := [name for name in fact.property_fields if name not in values]:
                     problems.append(
-                        f"Check {number}: {fact.evidence_id!r} holds none of "
-                        f"{fact.property_fields}."
+                        f"Check {number}: {fact.evidence_id!r} has no property field {missing}."
                     )
+                if not values:
                     continue
                 item["seen"] = {"evidence_id": fact.evidence_id, "values": values}
             else:

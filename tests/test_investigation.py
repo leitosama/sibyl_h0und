@@ -277,7 +277,7 @@ def test_the_challengers_usable_checks_reach_the_model_and_the_next_report_is_se
     reasons = repair.messages[-1]["content"]
     assert "Check 1: entity_id 'file-404' was never returned" in reasons
     assert "Check 2 repeats a call already made." in reasons
-    assert "Check 3" not in reasons
+    assert "Check 3: 'file-1' has no property field ['owner']." in reasons
     answer = investigation.after_review(repair, reply)
     again = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
 
@@ -335,6 +335,26 @@ def test_without_a_usable_challenge_the_model_gets_the_general_question(
     event = json.loads(path.read_text().splitlines()[-1])
     assert event["kind"] == "benign_challenged"
     assert event["fallback"] == (error or "no usable check")
+
+
+def test_a_failed_repair_keeps_the_checks_the_first_reply_got_right() -> None:
+    """When the challenger's repair turn fails, the head still gets the usable checks of
+    its first reply instead of the general question."""
+    investigation = fetched_file_investigation()
+    review = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
+    assert isinstance(review, Review)
+    first = challenge(
+        seen("file-1", "path"),
+        {"tool": "get_entity", "entity_id": "file-404", "reasoning": "Invented."},
+    )
+
+    repair = investigation.after_review(review, first)
+    assert isinstance(repair, Review)
+    answer = investigation.after_review(repair, None, "NextStepRequestError: timeout")
+
+    assert isinstance(answer, LocalAnswer)
+    (check,) = answer.feedback["challenge"]["checks"]
+    assert check["seen"]["evidence_id"] == "file-1"
 
 
 def report_call(report: dict[str, Any]) -> ToolCall:
