@@ -383,7 +383,10 @@ class SimpleSGRAgent:
             )
 
             decision = investigation.before_call(
-                tool_name, step.function.arguments, finish_only=finish_only
+                tool_name,
+                step.function.arguments,
+                finish_only=finish_only,
+                state=step.current_state,
             )
             decision = await settle(self.llm, investigation, decision, trace)
             if isinstance(decision, LocalAnswer):

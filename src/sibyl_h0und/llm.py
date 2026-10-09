@@ -2,7 +2,7 @@ import asyncio
 import json
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from types import TracebackType
 from typing import Any, Protocol, Self, TypeVar, cast
 
@@ -105,6 +105,7 @@ class OpenAIStructuredStepClient:
         timeout_seconds: float,
         max_completion_tokens: int,
         max_retries: int,
+        role_models: Mapping[str, str] | None = None,
         client: AsyncOpenAI | None = None,
     ) -> None:
         """Initialize an OpenAI-compatible structured step generator.
@@ -116,9 +117,11 @@ class OpenAIStructuredStepClient:
             timeout_seconds: Timeout applied to each provider request.
             max_completion_tokens: Maximum generated tokens per attempt.
             max_retries: Maximum schema-generation attempts per step.
+            role_models: Model of a side turn by its role; other turns use `model`.
             client: Optional injected SDK client used by tests.
         """
         self.model = model
+        self.role_models = dict(role_models or {})
         self.max_completion_tokens = max_completion_tokens
         self.max_retries = max_retries
         self._owns_client = client is None
@@ -251,10 +254,11 @@ class OpenAIStructuredStepClient:
             NextStepRequestError: If every provider reply violates the schema.
         """
         last_error: Exception | None = None
+        model = self.role_models.get(role, self.model)
 
         for attempt in range(1, self.max_retries + 1):
             response, latency_ms = await self._create_completion(
-                request_messages, response_format, trace
+                request_messages, response_format, model, trace
             )
             raw_content = extract_raw_content(response)
             total_tokens = response_total_tokens(response)
@@ -263,6 +267,7 @@ class OpenAIStructuredStepClient:
                 request_messages,
                 raw_content=raw_content,
                 role=role,
+                model=model,
                 attempt=attempt,
                 tokens=total_tokens,
                 duration_ms=latency_ms,
@@ -298,7 +303,11 @@ class OpenAIStructuredStepClient:
         raise NextStepRequestError(message) from last_error
 
     async def _create_completion(
-        self, messages: list[dict[str, Any]], response_format: dict[str, Any], trace: TaskTrace
+        self,
+        messages: list[dict[str, Any]],
+        response_format: dict[str, Any],
+        model: str,
+        trace: TaskTrace,
     ) -> tuple[Any, int]:
         """Request one completion, repeating it after transient provider errors.
 
@@ -308,6 +317,7 @@ class OpenAIStructuredStepClient:
         Args:
             messages: Request messages, including structured-output instructions.
             response_format: Step schema sent with the request.
+            model: Provider model identifier of this turn.
             trace: Task trace that receives one `llm_error` event per failure.
 
         Returns:
@@ -322,7 +332,7 @@ class OpenAIStructuredStepClient:
             started_at = time.perf_counter()
             try:
                 response = await self._client.chat.completions.create(
-                    model=self.model,
+                    model=model,
                     messages=cast(list[ChatCompletionMessageParam], messages),
                     response_format=cast(ResponseFormatJSONSchema, response_format),
                     max_completion_tokens=self.max_completion_tokens,

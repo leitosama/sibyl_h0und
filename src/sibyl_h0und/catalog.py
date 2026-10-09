@@ -18,8 +18,10 @@ from loguru import logger
 
 from sibyl_h0und.models import (
     PRACTICE_ARGUMENT_MODELS,
+    CallSource,
     Challenge,
     ChallengeCheck,
+    SeenSource,
     StepEnvelope,
     normalize_time_windows,
 )
@@ -213,15 +215,26 @@ class ToolCatalog:
             tools: Catalog tools a refuting check may call.
 
         Returns:
-            OpenAI-compatible response format of a `Challenge`, whose checks
-            call these tools with their own argument schemas.
+            OpenAI-compatible response format of a `Challenge`. A check's
+            source is either a call of one of these tools, with its own
+            argument schema, or a fact already seen (ADR 0026).
         """
         names = self._allowed(tools)
         key = ("challenge", names)
         if key not in self._formats:
             calls, definitions, strict = self._calls(names)
+            call = CallSource.model_json_schema()
+            call.pop("$defs", None)
+            call["properties"]["call"] = {**calls, "description": "The tool call that shows it."}
+            seen = SeenSource.model_json_schema()
+            seen["properties"]["seen"] = seen.pop("$defs")["SeenFact"]
+            for branch in (call, seen, seen["properties"]["seen"]):
+                _strict_object(branch)
             check = ChallengeCheck.model_json_schema()
-            check["properties"]["call"] = {**calls, "description": "The tool call that checks it."}
+            check["properties"]["source"] = {
+                "anyOf": [call, seen],
+                "description": check["properties"]["source"]["description"],
+            }
             check.pop("$defs", None)
             _strict_object(check)
             schema = Challenge.model_json_schema()

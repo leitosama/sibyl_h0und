@@ -18,7 +18,7 @@ from sibyl_h0und.catalog import FINISH_TOOL, ToolCatalog
 from sibyl_h0und.digest import evidence_digest
 from sibyl_h0und.ledger import GraphLedger, listing
 from sibyl_h0und.llm import render_json
-from sibyl_h0und.models import Challenge, ToolCall
+from sibyl_h0und.models import Challenge, SeenSource, ToolCall
 from sibyl_h0und.outcome import ToolOutcome, decode_json
 from sibyl_h0und.trace import TaskTrace
 from sibyl_h0und.vocabulary import KNOWLEDGE_TOOL, KNOWLEDGE_TOOL_SPEC, shared
@@ -73,10 +73,18 @@ Your job is to argue the opposite verdict.
 - Write the strongest attack hypothesis these facts allow: which stages of an intrusion the
   evidence could be, which entities would carry them out, and why the detection would fire.
   Build it only from facts in the evidence; do not invent entities or properties.
-- Then give one to three checks that would refute the hypothesis if it is wrong. Each check
-  is one call of an available tool, with ids taken from the alert, the evidence or
-  `still_open`, and says what result would refute the hypothesis. Prefer what is still
-  open: relations not yet visited, entities never fetched. A call already made adds nothing.
+- Then give one to three checks. Each check names the one fact that decides between the
+  attack and an innocent reading (`look_for`), what that fact shows if it is the attack
+  (`confirms_if`) and what it shows if it is not (`refuted_if`). Pick facts about what an
+  entity did, to what, from where and when, not about what it is called.
+- Give each check the source of its fact. If the evidence already holds it, cite it as
+  `seen`: the id of the entity or relation and the property fields that hold it. If it is
+  still unseen, give the one `call` of an available tool that would show it, with ids
+  taken from the alert, the evidence or `still_open`. Prefer what is still open:
+  relations not yet visited, entities never fetched.
+- An entity in the evidence is shown there in full: fetching it again shows nothing new.
+  What it did that is not shown yet is behind its `unvisited_relation_ids`: open one of
+  them. One more relation of a kind already seen does not show a new fact either.
 - Judge what each entity did, to what and from where, not what it is called. A familiar
   name, a signature, a usual parent or a plausible purpose does not refute an attack.
   An entity with many relations of which few were opened is a place an attack can hide.
@@ -99,7 +107,7 @@ You are the incident responder who writes the final report of an investigation. 
 investigation has reached its verdict; your job is to make the report right for that
 verdict. You see the alert, every piece of evidence the investigation gathered, what is
 still unvisited, the investigation's draft report and, if one was raised, a reviewer's
-challenge to a benign draft.
+challenge to a benign draft with the investigation's answers to it.
 
 Write the report as one call of the report tool:
 - Keep the draft's verdict. Do not change it.
@@ -116,12 +124,16 @@ Write the report as one call of the report tool:
   `host_to_isolate` on a host, `identity_to_rotate` on a windows_user,
   `file_to_delete` on a windows_file (not the process), `network_block` on a
   network_connection (not the remote host), `process_observed` on a windows_process.
-- Benign: the legitimacy evidence cites the entities and relations that explain the
-  activity, with the property fields that show it; use only property fields the evidence
-  shows for that entity or relation.
+- Benign: the legitimacy evidence is the short chain that explains the activity, cited
+  as entities: the entity that triggered the alert, what launched it, the account it ran
+  under and the object it acted on, each with the property fields that show why it is
+  legitimate; usually three to five items. Cite a relation only when the relation itself
+  is the explanation, not to link two cited entities. Use only property fields the
+  evidence shows for that entity or relation.
 - The reasoning tells the chain in a few sentences: stages, techniques and entities; for
-  benign, why each suspicious-looking action is explained, including the reviewer's
-  challenge if there was one.
+  benign, why each suspicious-looking action is explained. If a reviewer raised checks,
+  answer each with the value the evidence shows; `challenge.answers`, when present,
+  holds the investigation's own answers.
 
 Evidence layout: `hosts` groups each host with the entities and relations nearest to it;
 `between_hosts` holds relations that join entities of different hosts; `no_host` holds
@@ -134,15 +146,25 @@ REPORT_REPAIR = (
     "This report cannot be sent: {problem} Return the corrected report as one JSON object "
     "matching the schema."
 )
+# What the challenger is told once when a check repeats a call (ADR 0026).
+CHALLENGE_REPAIR = (
+    "Some checks need a fix: {problems} Fix them: cite a fact the evidence holds as "
+    "`seen`, or give a call that opens something still unvisited, such as one of an entity's "
+    "`unvisited_relation_ids`. Return the whole challenge again as one JSON object matching "
+    "the schema."
+)
 # What the head is told with the challenger's case.
 CHALLENGE_ANSWER = (
     "A benign verdict overrules the detection that raised this alert, so a reviewer who did "
     "not see your reasoning read the same evidence and argues it is an attack. `challenge` "
-    "gives its hypothesis and the checks that would refute it; `still_open` lists what is "
-    "known but unvisited. Make the checks you need (a repeated call returns its earlier "
-    "result). In `current_state`, answer each check: checked with which call, refuted by "
-    "which evidence id, or why it cannot be checked. Then submit the report again, malicious "
-    "or benign as the evidence says."
+    "gives its hypothesis and numbered checks. Each check names the fact that decides "
+    "(`look_for`), what confirms the attack and what refutes it. `seen` points at evidence "
+    "you already have and shows its values; `call` would show a fact not seen yet (a "
+    "repeated call returns its earlier result). `still_open` lists what is known but "
+    "unvisited. Make the calls you need. In the `current_state` of the step that submits the "
+    "report again, answer every check, one line each: `<n>: <the value you observed> -> "
+    "confirms | refutes | cannot check (why)`. A check answered with a fact other than the one "
+    "it names is not answered. Submit the report malicious or benign as the answers say."
 )
 
 
@@ -178,7 +200,7 @@ class Review:
         messages: The side turn's whole request.
         response_format: The side turn's schema.
         model: Model that validates the side turn's reply.
-        repaired: Whether this turn is the one repair a reporter gets.
+        repaired: Whether this turn is the one repair a side turn gets.
     """
 
     role: str
@@ -228,6 +250,10 @@ class Investigation:
         self._benign_challenged = False
         # The challenger's case the head was given, for the reporter.
         self._challenge_record: dict[str, Any] | None = None
+        # The head's answers to its checks, from the state of its report the reporter gets.
+        self._challenge_answers: str | None = None
+        # The challenger's case before its repair turn, kept if the repair gives nothing.
+        self._unrepaired: tuple[str, list[dict[str, Any]]] = ("", [])
         # Whether the report last sent is the reporter's rewrite of the head's.
         self._rewritten = False
         # Why the last report sent is the head's own, or `None` (ADR 0023).
@@ -249,7 +275,12 @@ class Investigation:
         }
 
     def before_call(
-        self, tool: str, arguments: dict[str, Any], *, finish_only: bool = False
+        self,
+        tool: str,
+        arguments: dict[str, Any],
+        *,
+        finish_only: bool = False,
+        state: str | None = None,
     ) -> LocalAnswer | Send | Review:
         """Decide whether the model's call reaches the runtime.
 
@@ -266,6 +297,8 @@ class Investigation:
             tool: Tool the model chose.
             arguments: Arguments the model chose, without nulls.
             finish_only: Whether only `finish_investigation` may be called.
+            state: The model's `current_state` of this step; after a challenge,
+                a report's state holds the answers to the checks (ADR 0026).
 
         Returns:
             A local answer, the prepared arguments to send, or the side turn
@@ -339,7 +372,7 @@ class Investigation:
             self._benign_challenged = True
             tools = self.catalog.runtime_tools()
             if not tools:
-                return self._challenge(arguments, None, "no runtime tool to check with")
+                return self._challenge(arguments, "", [], "no runtime tool to check with")
             logger.info("Asking the challenger about a benign verdict.")
             return Review(
                 CHALLENGER_ROLE,
@@ -349,6 +382,9 @@ class Investigation:
                 Challenge,
             )
         if tool == FINISH_TOOL and (report_format := self.catalog.report_format()) is not None:
+            if self._challenge_record is not None and state and self._challenge_answers is None:
+                # The first report after the challenge that is not refused answers it.
+                self._challenge_answers = state
             logger.info("Asking the reporter to write the report.")
             return Review(
                 REPORTER_ROLE, arguments, self._reporter_request(arguments), report_format, ToolCall
@@ -367,12 +403,33 @@ class Investigation:
 
         Returns:
             The local answer to the model's call, the report to send, or one
-            repair turn of the reporter.
+            repair turn of the side turn.
         """
         if review.role == REPORTER_ROLE:
             return self._report(review, reply if isinstance(reply, ToolCall) else None, error)
         challenge = reply if isinstance(reply, Challenge) else None
-        return self._challenge(review.arguments, challenge, error)
+        checks, problems = self._screen_checks(challenge) if challenge is not None else ([], [])
+        if challenge is not None and problems and not review.repaired:
+            logger.warning("Challenger checks need a repair ({}); asking once more.", problems)
+            self._unrepaired = (challenge.hypothesis, checks)
+            messages = [
+                *review.messages,
+                {"role": "assistant", "content": render_json(challenge.model_dump())},
+                {"role": "user", "content": CHALLENGE_REPAIR.format(problems=" ".join(problems))},
+            ]
+            return Review(
+                review.role,
+                review.arguments,
+                messages,
+                review.response_format,
+                review.model,
+                repaired=True,
+            )
+        hypothesis = challenge.hypothesis if challenge is not None else ""
+        if review.repaired and not checks and self._unrepaired[1]:
+            # A failed repair does not cost the checks the first reply got right.
+            hypothesis, checks = self._unrepaired
+        return self._challenge(review.arguments, hypothesis, checks, error)
 
     def _reporter_request(self, draft: dict[str, Any]) -> list[dict[str, Any]]:
         """Build the reporter's request: the alert, the evidence, the draft and any challenge."""
@@ -385,7 +442,9 @@ class Investigation:
             request["still_open"] = open_items
         request["draft_report"] = draft
         if self._challenge_record is not None:
-            request["challenge"] = self._challenge_record
+            request["challenge"] = dict(self._challenge_record)
+            if self._challenge_answers:
+                request["challenge"]["answers"] = self._challenge_answers
         return [
             {"role": "system", "content": REPORTER_PROMPT},
             {"role": "user", "content": render_json(request)},
@@ -490,26 +549,29 @@ class Investigation:
         ]
 
     def _challenge(
-        self, arguments: dict[str, Any], challenge: Challenge | None, error: str | None
+        self,
+        arguments: dict[str, Any],
+        hypothesis: str,
+        checks: list[dict[str, Any]],
+        error: str | None,
     ) -> LocalAnswer:
         """Return a benign report to the model with the challenger's case.
 
-        Checks that call a tool outside the catalog, break its schema or name
-        an id the runtime never returned are dropped. Without a usable check,
-        the model gets the general question of ADR 0020 instead.
+        Without a usable check, the model gets the general question of
+        ADR 0020 instead.
 
         Args:
             arguments: The benign report.
-            challenge: The challenger's reply, or `None` when it failed.
+            hypothesis: The challenger's hypothesis.
+            checks: The challenger's usable checks, numbered.
             error: Why the challenger failed, if it did.
 
         Returns:
             The local answer to the report.
         """
-        checks = self._usable_checks(challenge) if challenge is not None else []
         fallback = error
         if checks:
-            self._challenge_record = {"hypothesis": challenge.hypothesis, "checks": checks}
+            self._challenge_record = {"hypothesis": hypothesis, "checks": checks}
             feedback: dict[str, Any] = {
                 "status": "error",
                 "message": f"Not sent to the runtime: {CHALLENGE_ANSWER}",
@@ -530,29 +592,70 @@ class Investigation:
         )
         return LocalAnswer(feedback)
 
-    def _usable_checks(self, challenge: Challenge) -> list[dict[str, Any]]:
-        """Keep the checks the model could make: real tools, valid arguments, known ids, once."""
+    def _screen_checks(self, challenge: Challenge) -> tuple[list[dict[str, Any]], list[str]]:
+        """Keep the checks the model could answer, numbered, and say what is wrong with the rest.
+
+        A `call` must use a runtime tool with valid arguments and known ids; a
+        repeated one is kept as `already_made` but still reported. A `seen`
+        fact must name an object the runtime returned and fields it holds;
+        their values are shown. A check whose source repeats an earlier one is
+        dropped (ADR 0026).
+
+        Returns:
+            The usable checks and one sentence per check that needs a repair.
+        """
         tools = self.catalog.runtime_tools()
         checks: list[dict[str, Any]] = []
-        for check in challenge.checks:
-            tool = check.call.tool
-            if tool not in tools:
+        problems: list[str] = []
+        sources: list[dict[str, Any]] = []
+        for number, check in enumerate(challenge.checks, 1):
+            item: dict[str, Any] = {
+                "look_for": check.look_for,
+                "confirms_if": check.confirms_if,
+                "refuted_if": check.refuted_if,
+            }
+            source = check.source
+            if isinstance(source, SeenSource):
+                fact = source.seen
+                if fact.evidence_id not in self._ledger.objects:
+                    problems.append(
+                        f"Check {number} cites {fact.evidence_id!r}, which is not in the evidence."
+                    )
+                    continue
+                values = self._ledger.property_values(fact.evidence_id, fact.property_fields)
+                if missing := [name for name in fact.property_fields if name not in values]:
+                    problems.append(
+                        f"Check {number}: {fact.evidence_id!r} has no property field {missing}."
+                    )
+                if not values:
+                    continue
+                item["seen"] = {"evidence_id": fact.evidence_id, "values": values}
+            else:
+                tool = source.call.tool
+                if tool not in tools:
+                    problems.append(f"Check {number} calls {tool!r}, which is not available.")
+                    continue
+                try:
+                    arguments = self.catalog.prepare(tool, source.call.arguments)
+                except ValueError as exc:
+                    problems.append(f"Check {number}: {exc}")
+                    continue
+                decision = self._ledger.check(tool, arguments)
+                if decision.reason == "rejected" and decision.feedback is not None:
+                    reason = decision.feedback["message"].removeprefix("Not sent to the runtime: ")
+                    problems.append(f"Check {number}: {reason}")
+                    continue
+                item["call"] = {"tool": tool, **arguments}
+                if decision.reason == "cached":
+                    item["already_made"] = True
+                    problems.append(f"Check {number} repeats a call already made.")
+            found = item.get("seen") or item["call"]
+            if found in sources:
+                problems.append(f"Check {number} repeats an earlier check.")
                 continue
-            try:
-                arguments = self.catalog.prepare(tool, check.call.arguments)
-            except ValueError:
-                continue
-            decision = self._ledger.check(tool, arguments)
-            if decision.reason == "rejected":
-                continue
-            call = {"tool": tool, **arguments}
-            if any(item["call"] == call for item in checks):
-                continue
-            item: dict[str, Any] = {"call": call, "refuted_if": check.refuted_if}
-            if decision.reason == "cached":
-                item["already_made"] = True
-            checks.append(item)
-        return checks
+            sources.append(found)
+            checks.append({"n": len(checks) + 1, **item})
+        return checks, problems
 
     def after_call(self, tool: str, arguments: dict[str, Any], outcome: ToolOutcome) -> Reply:
         """Learn from a runtime answer and build the message the model sees.
