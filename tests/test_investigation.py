@@ -609,3 +609,32 @@ def test_local_decisions_are_traced(tmp_path: Path) -> None:
         "tool_cached",
         "tool_knowledge",
     ]
+
+
+@pytest.mark.parametrize(
+    ("outgoing", "advised"),
+    [pytest.param(20, False, id="two-pages"), pytest.param(21, True, id="more-than-two")],
+)
+def test_counting_is_advised_once_for_an_entity_with_more_than_two_pages_of_relations(
+    outgoing: int, advised: bool
+) -> None:
+    """A busy entity is told how to count a relation type and which incoming ones to open."""
+    investigation = Investigation(observation([*CATALOG, SCOPED_SEARCH]))
+    relations = {"incoming": ["in-1"], "outgoing": [f"rel-{index}" for index in range(outgoing)]}
+    sent = investigation.before_call("get_entity", get_entity())
+    assert isinstance(sent, Send)
+
+    reply = investigation.after_call(
+        "get_entity", sent.arguments, ToolOutcome("ok", {**PROCESS, "relation_ids": relations})
+    )
+    later = investigation.after_call(
+        "find", {"query": "run.ps1"}, ToolOutcome("ok", {"results": []})
+    )
+
+    advice = reply.feedback["still_open"].get("count_relations_with")
+    if advised:
+        assert advice is not None
+        assert "in-1" in advice
+    else:
+        assert advice is None
+    assert "count_relations_with" not in later.feedback["still_open"]

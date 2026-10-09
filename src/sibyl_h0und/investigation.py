@@ -28,6 +28,11 @@ NON_ALERT_FIELDS = frozenset({"available_tools", "last_tool_result"})
 # Shorter reasoning is a placeholder, not a report: practice runs ended long
 # investigations with "" and "Short test" (ADR 0018).
 MIN_REPORT_REASONING = 20
+# An entity with more outgoing relations than this many search pages is worth
+# counting by its last page instead of paging through.
+COUNTED_FANOUT_PAGES = 2
+# Results per page of the practice search, assumed until a page shows the task's own.
+ASSUMED_PAGE_SIZE = 10
 # The list a report of each verdict must not leave empty.
 REPORT_CITATIONS = {"malicious": "ir_artifacts", "benign": "legitimacy_evidence"}
 # The entity type each response kind acts on, as the organizers' SC-0045 report
@@ -580,8 +585,39 @@ class Investigation:
                     "target is this entity. For an entity with many relations, limit "
                     "`scope` to one relation type."
                 )
+                if counting := self._counting_advice(fetched):
+                    open_items["count_relations_with"] = counting
             feedback["still_open"] = open_items
         return Reply(feedback)
+
+    def _counting_advice(self, entity_id: str) -> str | None:
+        """Tell how to count one relation type of a busy entity with a single page.
+
+        The last page of a search scoped to a type tells how many relations of
+        that type name the entity; the ledger then says how many outgoing
+        relations are of other types (ADR 0027).
+        """
+        relations = self._ledger.entity_relations.get(entity_id, {})
+        outgoing = len(relations.get("outgoing", []))
+        page_size = self._ledger.page_size or ASSUMED_PAGE_SIZE
+        if outgoing <= COUNTED_FANOUT_PAGES * page_size:
+            return None
+        if self._ledger.page_size is None:
+            page = f"ceil({outgoing} / page size); a page that has a next one shows the size"
+        else:
+            page = str(-(-outgoing // page_size))
+        return (
+            f"It has {outgoing} outgoing relations. To count one relation type without "
+            f"paging, take the type the first page shows most and request page {page} of "
+            f"{self._relation_search} with this entity's full id, `scope` limited to that "
+            "type and no time window. still_open then tells how many outgoing relations "
+            "are of other types: 0 means stop paging that type and judge it as a whole; "
+            "a number means find that many of other types; a bound or a request for the "
+            "next page means the count is not finished, so ask the page it points to. "
+            "Open its incoming relations first: the count includes incoming ones of that "
+            "type. Incoming: "
+            f"{listing(relations.get('incoming', []))}."
+        )
 
 
 def report_problem(arguments: dict[str, Any]) -> str | None:

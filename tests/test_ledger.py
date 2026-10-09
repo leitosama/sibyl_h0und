@@ -1,3 +1,5 @@
+import pytest
+
 from sibyl_h0und.ledger import GraphLedger
 from sibyl_h0und.outcome import ToolOutcome
 
@@ -179,3 +181,161 @@ def test_alert_prose_names_ids_only_as_whole_words() -> None:
     assert not ledger.is_known("proc-1")
     assert not ledger.is_known("1")
     assert not ledger.is_known("proc")
+
+
+BUSY = {
+    "id": "proc-1",
+    "relation_ids": {
+        "incoming": ["in-1", "in-2"],
+        "outgoing": [f"out-{index}" for index in range(25)],
+    },
+}
+
+
+def connection(relation_id: str) -> dict[str, object]:
+    """An outgoing relation of the dominant type, whole, as a search returns it."""
+    return {
+        "id": relation_id,
+        "type": "connected_to",
+        "source_id": "proc-1",
+        "target_id": f"conn-{relation_id}",
+        "properties": {},
+    }
+
+
+def busy_ledger(incoming_types: tuple[str, ...] = ()) -> GraphLedger:
+    """Build a ledger that fetched a busy process and saw a first search page of 10.
+
+    Args:
+        incoming_types: Types of the incoming relations to open, in order.
+    """
+    ledger = GraphLedger()
+    ledger.observe_alert(ALERT)
+    ledger.record("get_entity", {"entity_id": "proc-1"}, ToolOutcome("ok", BUSY))
+    first = {"results": [connection(f"out-{index}") for index in range(10)], "next_page_id": 2}
+    ledger.record("search", {"query": "proc-1", "page_id": 1}, ToolOutcome("ok", first))
+    for relation_id, relation_type in zip(("in-1", "in-2"), incoming_types, strict=False):
+        relation = {
+            "id": relation_id,
+            "type": relation_type,
+            "source_id": "x",
+            "target_id": "proc-1",
+        }
+        ledger.record("get_relation", {"relation_id": relation_id}, ToolOutcome("ok", relation))
+    return ledger
+
+
+def count_page(
+    ledger: GraphLedger,
+    results: list[dict[str, object]],
+    next_page_id: int | None = None,
+    **extra: object,
+) -> dict[str, object]:
+    """Record page 3 of the search by the process id scoped to `connected_to`."""
+    arguments = {
+        "query": "proc-1",
+        "scope": {"kind": "relation", "type": "connected_to"},
+        "page_id": 3,
+        **extra,
+    }
+    found = {"results": results, "current_page_id": 3, "next_page_id": next_page_id}
+    ledger.record("search", arguments, ToolOutcome("ok", found))
+    return ledger.summary()["entities_with_open_relations"][0]
+
+
+@pytest.mark.parametrize(
+    ("on_last_page", "expected"),
+    [
+        pytest.param(6, "25 outgoing; 0 outgoing relations are of other types", id="all-of-type"),
+        pytest.param(3, "22 outgoing; 3 outgoing relations are of other types", id="others"),
+    ],
+)
+def test_the_last_page_of_a_type_counts_the_outgoing_relations_of_other_types(
+    on_last_page: int, expected: str
+) -> None:
+    """Page 3 of 10 makes 20 + n of the type; an incoming one of that type is not outgoing."""
+    ledger = busy_ledger(("parent_of", "connected_to"))
+
+    entry = count_page(ledger, [connection(f"x-{index}") for index in range(on_last_page)])
+
+    assert entry["outgoing_by_type"] == {"connected_to": expected}
+
+
+def test_a_count_is_not_split_by_direction_while_an_incoming_type_is_unknown() -> None:
+    """An unopened incoming relation may be of the counted type."""
+    entry = count_page(busy_ledger(), [connection(f"x-{index}") for index in range(6)])
+
+    assert "open its incoming relations" in entry["outgoing_by_type"]["connected_to"]
+
+
+def test_an_empty_page_past_the_end_bounds_the_count() -> None:
+    """Nothing on page 3 means at most 20 of the type, so at least 5 other outgoing ones."""
+    entry = count_page(busy_ledger(("parent_of", "parent_of")), [])
+
+    assert entry["outgoing_by_type"] == {
+        "connected_to": "at most 20 name this entity; at least 5 outgoing relations are of other "
+        "types"
+    }
+
+
+def test_an_empty_first_page_says_the_type_is_absent() -> None:
+    """A type with no relation at all is not mistaken for a split with no other types."""
+    entry = count_page(busy_ledger(), [], page_id=1)
+
+    assert entry["outgoing_by_type"] == {"connected_to": "no relations of this type"}
+
+
+def test_a_page_with_a_next_one_asks_for_it() -> None:
+    """Incoming relations of the type can push it past the advised page."""
+    page = [connection(f"x-{index}") for index in range(10)]
+
+    entry = count_page(busy_ledger(("parent_of", "parent_of")), page, next_page_id=4)
+
+    assert entry["outgoing_by_type"]["connected_to"].startswith("more than 30")
+
+
+def test_an_exact_count_is_kept_over_a_later_bound() -> None:
+    """Probing an empty page after the last one must not blur the exact count."""
+    ledger = busy_ledger(("parent_of", "parent_of"))
+    count_page(ledger, [connection(f"x-{index}") for index in range(5)])
+
+    entry = count_page(ledger, [], page_id=4)
+
+    assert entry["outgoing_by_type"] == {
+        "connected_to": "25 outgoing; 0 outgoing relations are of other types"
+    }
+
+
+def test_a_count_larger_than_the_entity_is_flagged_not_split() -> None:
+    """A total above the entity's relations cannot give a negative number of others."""
+    entry = count_page(
+        busy_ledger(("parent_of", "parent_of")), [connection(f"x-{index}") for index in range(8)]
+    )
+
+    assert "says nothing" in entry["outgoing_by_type"]["connected_to"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param({"time_window": {"from": "2024-06-12T11:00:00Z"}}, id="time-window"),
+        pytest.param({"query": "conn-x-1"}, id="not-a-fetched-entity"),
+        pytest.param({"scope": {"kind": "entity", "type": "windows_process"}}, id="entity-scope"),
+    ],
+)
+def test_a_search_not_comparable_with_the_relation_ids_counts_nothing(
+    extra: dict[str, object],
+) -> None:
+    """Only an unwindowed search by the entity's id, scoped to a relation type, counts."""
+    entry = count_page(busy_ledger(("parent_of", "parent_of")), [connection("x-1")], **extra)
+
+    assert "outgoing_by_type" not in entry
+
+
+def test_a_page_with_a_hit_that_does_not_name_the_entity_counts_nothing() -> None:
+    """A substring match on another relation would inflate the count."""
+    stray = {**connection("x-2"), "source_id": "proc-10"}
+
+    entry = count_page(busy_ledger(("parent_of", "parent_of")), [connection("x-1"), stray])
+
+    assert "outgoing_by_type" not in entry

@@ -71,7 +71,10 @@ hypotheses and the evidence for and against each.
    a page at a time; keep those whose source or target is that entity. For an entity
    with very many relations, also limit the search to one relation type, starting with
    the types that show what it did: process creation, file writes, executions, registry
-   and service changes.
+   and service changes. When the trigger has few incoming relations, open them all: they
+   tell who started it and who acted on it. When most relations of a busy entity
+   share one type, count that type with one page as `still_open` advises instead of
+   paging through it, then look for the relations of other types it leaves.
 3. Place it on the kill chain, with MITRE ATT&CK as the map. For each notable action,
    name the tactic and technique it would be if hostile. An alert is one stage of a
    longer chain, so always look one stage back and one stage forward, whatever the

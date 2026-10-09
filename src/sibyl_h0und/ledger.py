@@ -65,6 +65,13 @@ class GraphLedger:
     # Incoming and outgoing relation ids of every fetched entity.
     entity_relations: dict[str, dict[str, list[str]]] = field(default_factory=dict)
     cache: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Results on a search page that has a next one, learned from the first such page.
+    page_size: int | None = None
+    # Per fetched entity and relation type: how many relations of that type name
+    # the entity, read from a page of a search by its id scoped to the type, and
+    # whether the number is `exact`, `at_most` (an empty page past the end) or
+    # `more_than` (a page that has a next one).
+    relation_counts: dict[str, dict[str, tuple[int, str]]] = field(default_factory=dict)
     # Every entity or relation object the runtime returned, merged by id, in
     # the order first seen: the alert's objects come first.
     objects: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -142,6 +149,7 @@ class GraphLedger:
             self.visited_relations.add(relation_id)
             self.relations.add(relation_id)
             self._record_fetched(relation_id, result)
+        self._record_page(arguments, result)
         self._collect(result)
 
     def summary(self) -> dict[str, Any]:
@@ -159,7 +167,9 @@ class GraphLedger:
                 if visited < len(ids):
                     counts[direction] = f"{len(ids)} relations, {visited} visited"
             if counts:
-                open_entities.append({"entity_id": entity_id, **counts})
+                open_entities.append(
+                    {"entity_id": entity_id, **counts, **self._relation_shape(entity_id)}
+                )
         summary: dict[str, Any] = {}
         if open_entities:
             summary["entities_with_open_relations"] = open_entities
@@ -167,6 +177,105 @@ class GraphLedger:
         if unvisited:
             summary["unvisited_entities"] = listing(unvisited)
         return summary
+
+    def _relation_shape(self, entity_id: str) -> dict[str, Any]:
+        """Say how many outgoing relations are of each counted type.
+
+        A count of one type covers incoming relations of that type too, so the
+        incoming relations whose type is known are subtracted from it.
+        """
+        directions = self.entity_relations[entity_id]
+        incoming = directions.get("incoming", [])
+        outgoing = len(directions.get("outgoing", []))
+        by_type: dict[str, str] = {}
+        for relation_type, (count, bound) in self.relation_counts.get(entity_id, {}).items():
+            if bound == "more_than":
+                by_type[relation_type] = (
+                    f"more than {count} name this entity; request the next page to finish the count"
+                )
+                continue
+            if bound == "at_most":
+                others = outgoing - count
+                by_type[relation_type] = f"at most {count} name this entity" + (
+                    f"; at least {others} outgoing relations are of other types"
+                    if others > 0
+                    else ""
+                )
+                continue
+            if count == 0:
+                by_type[relation_type] = "no relations of this type"
+                continue
+            types = [self.objects.get(item, {}).get("type") for item in incoming]
+            if None in types:
+                by_type[relation_type] = (
+                    f"{count} relations name this entity, incoming included; open its "
+                    "incoming relations to tell how many are outgoing"
+                )
+                continue
+            out = count - types.count(relation_type)
+            if not 0 <= out <= outgoing:
+                by_type[relation_type] = (
+                    f"{count} found, more than this entity has: the search also matched "
+                    "other relations, so this count says nothing"
+                )
+                continue
+            by_type[relation_type] = (
+                f"{out} outgoing; {outgoing - out} outgoing relations are of other types"
+            )
+        return {"outgoing_by_type": by_type} if by_type else {}
+
+    def _record_page(self, arguments: dict[str, Any], result: Any) -> None:
+        """Learn the page size and count relation types from one search page.
+
+        A page is the answer to a call with `query` and `page_id` that holds
+        `results` and `next_page_id`. Only a search by a fetched entity's full
+        id, scoped to a relation type, without a time window, counts, and only
+        when every hit on the page names the entity: its total is then
+        comparable with the entity's relation ids. An exact count is never
+        replaced by a bound.
+        """
+        query = arguments.get("query")
+        page = arguments.get("page_id")
+        if (
+            not isinstance(result, dict)
+            or "next_page_id" not in result
+            or not isinstance(result.get("results"), list)
+            or not isinstance(query, str)
+            or not isinstance(page, int)
+        ):
+            return
+        items = result["results"]
+        has_next = result["next_page_id"] is not None
+        if has_next and self.page_size is None and items:
+            self.page_size = len(items)
+        entity_id = query.strip()
+        scope = arguments.get("scope")
+        if (
+            entity_id not in self.entity_relations
+            or not isinstance(scope, dict)
+            or scope.get("kind") != "relation"
+            or not isinstance(scope.get("type"), str)
+            or arguments.get("time_window")
+            or (page > 1 and self.page_size is None)
+        ):
+            return
+        if any(
+            not isinstance(item, dict)
+            or entity_id not in (item.get("source_id"), item.get("target_id"))
+            for item in items
+        ):
+            return
+        before = (page - 1) * (self.page_size or 0)
+        if has_next:
+            count = (before + len(items), "more_than")
+        elif items or page == 1:
+            count = (before + len(items), "exact")
+        else:
+            count = (before, "at_most")
+        counts = self.relation_counts.setdefault(entity_id, {})
+        known = counts.get(scope["type"])
+        if known is None or known[1] != "exact":
+            counts[scope["type"]] = count
 
     def unvisited_entities(self) -> list[str]:
         """Return known entity ids that were never fetched."""
