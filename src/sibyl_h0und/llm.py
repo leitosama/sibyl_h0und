@@ -260,7 +260,14 @@ class OpenAIStructuredStepClient:
             response, latency_ms = await self._create_completion(
                 request_messages, response_format, model, trace
             )
-            raw_content = extract_raw_content(response)
+            # A reply without a usable message, such as a refusal or empty
+            # `choices`, is traced and repaired like a malformed one.
+            try:
+                raw_content = extract_raw_content(response)
+            except ValueError as exc:
+                raw_content, unusable = "", exc
+            else:
+                unusable = None
             total_tokens = response_total_tokens(response)
             trace.count_llm_attempt(tokens=total_tokens, ms=latency_ms)
             trace.llm_call(
@@ -271,9 +278,12 @@ class OpenAIStructuredStepClient:
                 attempt=attempt,
                 tokens=total_tokens,
                 duration_ms=latency_ms,
+                **({"error": str(unusable)} if unusable is not None else {}),
             )
 
             try:
+                if unusable is not None:
+                    raise unusable
                 reply = parse(raw_content)
             except ValueError as exc:
                 last_error = exc
