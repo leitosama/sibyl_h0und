@@ -15,6 +15,7 @@ from bluesec1_client import (
     RunCapacityExceededError,
 )
 from sibyl_h0und.agent import SimpleSGRAgent
+from sibyl_h0und.investigation import CHALLENGER_ROLE
 from sibyl_h0und.llm import OpenAIStructuredStepClient
 from sibyl_h0und.settings import Settings
 
@@ -69,6 +70,7 @@ async def run(args: argparse.Namespace) -> None:
                 "agent": agent_name,
                 "implementation": "structured-generation-scenario-runtime-grpc",
                 "model": settings.llm_default_model,
+                "role_models": llm.role_models,
             },
         ) as client,
     ):
@@ -82,6 +84,7 @@ async def run(args: argparse.Namespace) -> None:
                 "arena": args.arena or settings.scenario_runtime_arena,
                 "endpoint": args.endpoint or settings.scenario_runtime_endpoint,
                 "model": settings.llm_default_model,
+                "role_models": llm.role_models,
                 "llm_max_completion_tokens": settings.llm_max_completion_tokens,
                 "llm_max_step_retries": settings.llm_max_step_retries,
                 "agent_max_runtime_calls": settings.agent_max_runtime_calls,
@@ -135,7 +138,15 @@ def llm_client(settings: Settings) -> OpenAIStructuredStepClient:
         timeout_seconds=settings.llm_timeout_seconds,
         max_completion_tokens=settings.llm_max_completion_tokens,
         max_retries=settings.llm_max_step_retries,
+        role_models=role_models(settings),
     )
+
+
+def role_models(settings: Settings) -> dict[str, str]:
+    """Return the models the settings give side turns instead of the default one."""
+    if settings.llm_challenger_model is None:
+        return {}
+    return {CHALLENGER_ROLE: settings.llm_challenger_model}
 
 
 def load_settings() -> Settings:
