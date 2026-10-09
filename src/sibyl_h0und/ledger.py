@@ -29,6 +29,9 @@ ID_BOUNDARY = r"\s\"'`,;()\[\]{}<>"
 MIN_PROSE_ID_LENGTH = 4
 # How many ids an error message or a summary lists before it only counts them.
 MAX_LISTED_IDS = 30
+# An entity with more outgoing relations than this many search pages is worth
+# counting by its last page instead of paging through.
+COUNTED_FANOUT_PAGES = 2
 # Marks a property field an object does not hold.
 _MISSING = object()
 
@@ -181,27 +184,36 @@ class GraphLedger:
         return summary
 
     def _relation_shape(self, entity_id: str) -> dict[str, Any]:
-        """Say how many outgoing relations are of each counted type.
+        """Say how many outgoing relations are of each counted type, and where to count.
 
         A count of one type covers incoming relations of that type too, so the
-        incoming relations whose type is known are subtracted from it.
+        incoming relations whose type is known are subtracted from it. Once the
+        page size is known, a busy entity without a finished count is told the
+        page that counts one type, and an unfinished count the page to ask next.
         """
         directions = self.entity_relations[entity_id]
         incoming = directions.get("incoming", [])
         outgoing = len(directions.get("outgoing", []))
+        page_size = self.page_size
         by_type: dict[str, str] = {}
         for relation_type, (count, bound) in self.relation_counts.get(entity_id, {}).items():
             if bound == "more_than":
-                by_type[relation_type] = (
-                    f"more than {count} name this entity; request the next page to finish the count"
+                by_type[relation_type] = f"more than {count} name this entity; " + (
+                    f"request page {count // page_size + 1} to finish the count"
+                    if page_size
+                    else "request the next page to finish the count"
                 )
                 continue
             if bound == "at_most":
                 others = outgoing - count
-                by_type[relation_type] = f"at most {count} name this entity" + (
-                    f"; at least {others} outgoing relations are of other types"
-                    if others > 0
-                    else ""
+                by_type[relation_type] = (
+                    f"at most {count} name this entity"
+                    + (
+                        f"; at least {others} outgoing relations are of other types"
+                        if others > 0
+                        else ""
+                    )
+                    + (f"; request page {count // page_size} next" if page_size else "")
                 )
                 continue
             if count == 0:
@@ -224,7 +236,17 @@ class GraphLedger:
             by_type[relation_type] = (
                 f"{out} outgoing; {outgoing - out} outgoing relations are of other types"
             )
-        return {"outgoing_by_type": by_type} if by_type else {}
+        shape: dict[str, Any] = {"outgoing_by_type": by_type} if by_type else {}
+        finished = any(
+            bound == "exact" and count > 0
+            for count, bound in self.relation_counts.get(entity_id, {}).values()
+        )
+        if page_size and outgoing > COUNTED_FANOUT_PAGES * page_size and not finished:
+            shape["count_page"] = (
+                f"page {-(-outgoing // page_size)} of a search by this entity's id scoped to "
+                "one relation type counts that type"
+            )
+        return shape
 
     def _record_page(self, arguments: dict[str, Any], result: Any) -> None:
         """Learn the page size and count relation types from one search page.

@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from sibyl_h0und.catalog import FINISH_TOOL, ToolCatalog
 from sibyl_h0und.digest import evidence_digest
-from sibyl_h0und.ledger import GraphLedger, listing
+from sibyl_h0und.ledger import COUNTED_FANOUT_PAGES, GraphLedger, listing
 from sibyl_h0und.llm import render_json
 from sibyl_h0und.models import Challenge, SeenSource, ToolCall
 from sibyl_h0und.outcome import ToolOutcome, decode_json
@@ -28,9 +28,6 @@ NON_ALERT_FIELDS = frozenset({"available_tools", "last_tool_result"})
 # Shorter reasoning is a placeholder, not a report: practice runs ended long
 # investigations with "" and "Short test" (ADR 0018).
 MIN_REPORT_REASONING = 20
-# An entity with more outgoing relations than this many search pages is worth
-# counting by its last page instead of paging through.
-COUNTED_FANOUT_PAGES = 2
 # Results per page of the practice search, assumed until a page shows the task's own.
 ASSUMED_PAGE_SIZE = 10
 # The list a report of each verdict must not leave empty.

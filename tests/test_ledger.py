@@ -261,6 +261,17 @@ def test_the_last_page_of_a_type_counts_the_outgoing_relations_of_other_types(
     assert entry["outgoing_by_type"] == {"connected_to": expected}
 
 
+def test_a_busy_entity_is_told_the_counting_page_until_a_type_is_counted() -> None:
+    """25 outgoing relations at 10 per page: page 3 counts one type."""
+    ledger = busy_ledger(("parent_of", "parent_of"))
+    before = ledger.summary()["entities_with_open_relations"][0]
+
+    after = count_page(ledger, [connection(f"x-{index}") for index in range(5)])
+
+    assert before["count_page"].startswith("page 3 ")
+    assert "count_page" not in after
+
+
 def test_a_count_is_not_split_by_direction_while_an_incoming_type_is_unknown() -> None:
     """An unopened incoming relation may be of the counted type."""
     entry = count_page(busy_ledger(), [connection(f"x-{index}") for index in range(6)])
@@ -274,7 +285,7 @@ def test_an_empty_page_past_the_end_bounds_the_count() -> None:
 
     assert entry["outgoing_by_type"] == {
         "connected_to": "at most 20 name this entity; at least 5 outgoing relations are of other "
-        "types"
+        "types; request page 2 next"
     }
 
 
