@@ -29,6 +29,7 @@ uv run --env-file .env.h0und2 h0und
 | Документ | О чём |
 | --- | --- |
 | [docs/competition.md](docs/competition.md) | правила, сроки, оценка, протокол runtime, инструменты |
+| [docs/example-investigation.md](docs/example-investigation.md) | учебный пример расследования от организаторов и выводы из него |
 | [docs/architecture.md](docs/architecture.md) | как устроены агенты сейчас и куда идём |
 | [docs/development.md](docs/development.md) | окружение, проверки, порядок работы, бенчи, трейсы |
 | [CLAUDE.md](CLAUDE.md) | инструкции для Claude Code |
