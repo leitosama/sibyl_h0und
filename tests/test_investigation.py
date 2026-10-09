@@ -211,14 +211,27 @@ BENIGN_REPORT = {
 }
 
 
-def challenge(*calls: dict[str, Any]) -> Challenge:
-    """Build a challenger reply whose checks make these calls."""
+def challenge(*sources: dict[str, Any]) -> Challenge:
+    """Build a challenger reply whose checks have these sources, `call` or `seen`."""
     return Challenge.model_validate(
         {
             "hypothesis": "The script in System32 is a dropped payload.",
-            "checks": [{"refuted_if": "No writer.", "call": call} for call in calls],
+            "checks": [
+                {
+                    "look_for": "Who wrote the script.",
+                    "confirms_if": "A remote process.",
+                    "refuted_if": "No writer.",
+                    "source": source if "seen" in source else {"call": source},
+                }
+                for source in sources
+            ],
         }
     )
+
+
+def seen(evidence_id: str, *fields: str) -> dict[str, Any]:
+    """A check source that cites fields of evidence already gathered."""
+    return {"seen": {"evidence_id": evidence_id, "property_fields": list(fields)}}
 
 
 def fetched_file_investigation(path: Path | None = None) -> Investigation:
@@ -245,8 +258,10 @@ def test_the_first_benign_report_goes_to_the_challenger_without_the_heads_reason
 
 
 def test_the_challengers_usable_checks_reach_the_model_and_the_next_report_is_sent() -> None:
-    """A check with an invented id is dropped, a repeated one is marked as made, and the
-    model's next report goes to the runtime as is."""
+    """Checks with an invented id or a repeated call go back to the challenger once, with
+    the reason for each; then a check with an invented id is dropped, a repeated call is
+    marked as made, a seen fact shows the values of the fields the evidence holds, the
+    checks are numbered, and the model's next report goes to the runtime as is."""
     investigation = fetched_file_investigation()
     review = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
     assert isinstance(review, Review)
@@ -254,18 +269,39 @@ def test_the_challengers_usable_checks_reach_the_model_and_the_next_report_is_se
     reply = challenge(
         {"tool": "get_entity", "entity_id": "file-404", "reasoning": "Invented."},
         {"tool": "get_entity", "entity_id": "file-1", "reasoning": "Again."},
+        seen("file-1", "path", "owner"),
     )
-    answer = investigation.after_review(review, reply)
+    repair = investigation.after_review(review, reply)
+    assert isinstance(repair, Review)
+    assert repair.messages[: len(review.messages)] == review.messages
+    reasons = repair.messages[-1]["content"]
+    assert "Check 1: entity_id 'file-404' was never returned" in reasons
+    assert "Check 2 repeats a call already made." in reasons
+    assert "Check 3" not in reasons
+    answer = investigation.after_review(repair, reply)
     again = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
 
     assert answer.feedback["challenge"] == {
         "hypothesis": reply.hypothesis,
         "checks": [
             {
-                "call": {"tool": "get_entity", "entity_id": "file-1", "reasoning": "Again."},
+                "n": 1,
+                "look_for": "Who wrote the script.",
+                "confirms_if": "A remote process.",
                 "refuted_if": "No writer.",
+                "call": {"tool": "get_entity", "entity_id": "file-1", "reasoning": "Again."},
                 "already_made": True,
-            }
+            },
+            {
+                "n": 2,
+                "look_for": "Who wrote the script.",
+                "confirms_if": "A remote process.",
+                "refuted_if": "No writer.",
+                "seen": {
+                    "evidence_id": "file-1",
+                    "values": {"path": DROPPED_FILE["properties"]["path"]},
+                },
+            },
         ],
     }
     assert to_reporter(again) == {"submission": BENIGN_REPORT}
@@ -290,6 +326,9 @@ def test_without_a_usable_challenge_the_model_gets_the_general_question(
     assert isinstance(review, Review)
 
     answer = investigation.after_review(review, reply, error)
+    if isinstance(answer, Review):
+        # An unusable check goes back to the challenger once.
+        answer = investigation.after_review(answer, reply, error)
 
     assert "one stage before" in answer.feedback["message"]
     assert "challenge" not in answer.feedback
@@ -319,17 +358,18 @@ def test_the_reporters_report_is_sent_and_it_sees_the_draft_evidence_and_challen
     investigation = fetched_file_investigation(path)
     review = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
     assert isinstance(review, Review)
-    investigation.after_review(
-        review, challenge({"tool": "get_entity", "entity_id": "file-1", "reasoning": "x"})
-    )
+    investigation.after_review(review, challenge(seen("file-1", "path")))
 
-    reporter = investigation.before_call(FINISH_TOOL, {"submission": REPORT})
+    reporter = investigation.before_call(
+        FINISH_TOOL, {"submission": REPORT}, state="1: written by a remote shell -> confirms."
+    )
     assert isinstance(reporter, Review)
     request = json.loads(reporter.messages[-1]["content"])
     sent = investigation.after_review(reporter, report_call(REWRITTEN_REPORT))
 
     assert request["draft_report"] == {"submission": REPORT}
     assert request["challenge"]["hypothesis"].startswith("The script in System32")
+    assert request["challenge"]["answers"] == "1: written by a remote shell -> confirms."
     assert request["evidence"]["no_host"]["entities"] == [DROPPED_FILE]
     assert sent == Send({"submission": REWRITTEN_REPORT})
     event = json.loads(path.read_text().splitlines()[-1])

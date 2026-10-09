@@ -29,6 +29,8 @@ ID_BOUNDARY = r"\s\"'`,;()\[\]{}<>"
 MIN_PROSE_ID_LENGTH = 4
 # How many ids an error message or a summary lists before it only counts them.
 MAX_LISTED_IDS = 30
+# Marks a property field an object does not hold.
+_MISSING = object()
 
 
 @dataclass(frozen=True)
@@ -215,6 +217,38 @@ class GraphLedger:
         """Return the known entity ids of one type, sorted."""
         known = self.entities | self.entity_references.keys()
         return sorted(item for item in known if self.entity_type(item) == entity_type)
+
+    def property_values(self, object_id: str, fields: list[str]) -> dict[str, Any]:
+        """Read property fields of an entity or relation the runtime returned.
+
+        A field is a dotted path from the object or from its `properties`,
+        or else a bare key at any depth, as a report cites it. A field that
+        holds `null` is a fact too.
+
+        Args:
+            object_id: Id of the object.
+            fields: Property fields to read.
+
+        Returns:
+            The value of each field the object holds, by field; fields it does
+            not hold are left out.
+        """
+        found: dict[str, Any] = {}
+        node = self.objects.get(object_id)
+        if node is None:
+            return found
+        for name in fields:
+            for path in (name, f"properties.{name}"):
+                value: Any = node
+                for part in path.split("."):
+                    value = value.get(part, _MISSING) if isinstance(value, dict) else _MISSING
+                if value is not _MISSING:
+                    found[name] = value
+                    break
+            else:
+                if (value := _find_key(node, name)) is not None:
+                    found[name] = value
+        return found
 
     def _in_alert_text(self, value: str) -> bool:
         """Tell whether the alert's prose names this id as a whole word."""

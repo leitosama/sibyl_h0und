@@ -349,13 +349,42 @@ class NextStep(StepEnvelope):
     function: ToolCall = Field(description="Execute the first remaining step.")
 
 
-class ChallengeCheck(BaseModel):
-    """One call that would refute the challenger's attack hypothesis."""
+class SeenFact(BaseModel):
+    """Where the evidence already gathered holds the deciding fact."""
 
     model_config = ConfigDict(extra="ignore")
 
-    refuted_if: str = Field(min_length=1, description="The result that refutes the hypothesis.")
-    call: ToolCall = Field(description="The tool call that checks it.")
+    evidence_id: str = Field(min_length=1, description="Id of the entity or relation.")
+    property_fields: list[PropertyFieldName] = Field(
+        min_length=1, description="Its property fields that hold the fact."
+    )
+
+
+class CallSource(BaseModel):
+    """The deciding fact is still unseen: the tool call that would show it."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    call: ToolCall = Field(description="The tool call that shows the fact.")
+
+
+class SeenSource(BaseModel):
+    """The deciding fact is already in the evidence."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    seen: SeenFact
+
+
+class ChallengeCheck(BaseModel):
+    """One fact that decides the challenger's attack hypothesis (ADR 0025)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    look_for: str = Field(min_length=1, description="The fact that decides.")
+    confirms_if: str = Field(min_length=1, description="What this fact shows if it is an attack.")
+    refuted_if: str = Field(min_length=1, description="What it shows if it is not.")
+    source: CallSource | SeenSource = Field(description="Where the fact is or would be found.")
 
 
 class Challenge(BaseModel):

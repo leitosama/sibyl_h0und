@@ -18,10 +18,13 @@ import argparse
 import asyncio
 import hashlib
 import json
+from collections import Counter
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+
+from pydantic import ValidationError
 
 from sibyl_h0und.agent import settle
 from sibyl_h0und.catalog import FINISH_TOOL
@@ -56,12 +59,14 @@ class Case:
         split: `dev` or `holdout`.
         investigation: The investigation rebuilt up to the report.
         review: The side turn the report asks for.
+        recorded: The local answer the live agent gave the report, if any.
     """
 
     task: RecordedTask
     split: str
     investigation: Investigation
     review: Review
+    recorded: dict[str, Any] | None = None
 
     @property
     def final_verdict(self) -> str | None:
@@ -112,19 +117,42 @@ def build_case(task: RecordedTask, role: str = CHALLENGER_ROLE) -> Case | None:
                 investigation.after_call(call.tool, call.arguments, call.outcome)
         replayed = draft.calls_before
         decision = investigation.before_call(
-            FINISH_TOOL, draft.arguments, finish_only=draft.finish_only
+            FINISH_TOOL, draft.arguments, finish_only=draft.finish_only, state=draft.state
         )
         if isinstance(decision, Review) and decision.role == role:
-            return Case(task, split_of(task.task_id), investigation, decision)
+            return Case(task, split_of(task.task_id), investigation, decision, draft.feedback)
         if isinstance(decision, Review) and decision.role == CHALLENGER_ROLE:
-            recorded = (draft.feedback or {}).get("challenge")
-            challenge = Challenge.model_validate(recorded) if recorded else None
-            missing = None if challenge else "no challenge in the trace"
-            investigation.after_review(decision, challenge, missing)
+            challenge, missing = recorded_challenge(draft.feedback)
+            # The trace holds the final challenge, after any repair turn.
+            investigation.after_review(replace(decision, repaired=True), challenge, missing)
         elif not isinstance(decision, LocalAnswer):
             # The report reached the runtime and ended the task.
             return None
     return None
+
+
+def recorded_challenge(feedback: dict[str, Any] | None) -> tuple[Challenge | None, str | None]:
+    """Read the challenge a trace recorded, or say why there is none.
+
+    Traces written before ADR 0025 hold checks of another shape; their
+    challenge reads as missing.
+    """
+    recorded = (feedback or {}).get("challenge")
+    if not recorded:
+        return None, "no challenge in the trace"
+    checks = []
+    for check in recorded.get("checks", []):
+        seen = check.get("seen")
+        source = (
+            {"seen": {"evidence_id": seen.get("evidence_id"), "property_fields": [*seen["values"]]}}
+            if isinstance(seen, dict) and isinstance(seen.get("values"), dict)
+            else {"call": check.get("call")}
+        )
+        checks.append({**check, "source": source})
+    try:
+        return Challenge.model_validate({**recorded, "checks": checks}), None
+    except ValidationError:
+        return None, "the trace's challenge predates ADR 0025"
 
 
 def load_cases(
@@ -176,16 +204,33 @@ def render(case: Case, answer: LocalAnswer | Send, wrong_below: float) -> str:
         reasoning = (find_report(answer.arguments) or {}).get("reasoning")
         lines.append(f"  reasoning: {reasoning}")
         return "\n".join(lines)
+    before, after = check_counts(case.recorded), check_counts(answer.feedback)
+    lines.append(f"  checks recorded {before} -> replayed {after}")
     found = answer.feedback.get("challenge")
     if found is None:
         lines.append("  fallback: the general question of ADR 0020")
     else:
         lines.append(f"  hypothesis: {found['hypothesis']}")
         for check in found["checks"]:
-            made = " [already made]" if check.get("already_made") else ""
-            lines.append(f"  - {json.dumps(check['call'], ensure_ascii=False)}{made}")
-            lines.append(f"    refuted if: {check['refuted_if']}")
+            lines.append(f"  {check['n']}. look for: {check['look_for']}")
+            if "seen" in check:
+                lines.append(f"     seen: {json.dumps(check['seen'], ensure_ascii=False)}")
+            else:
+                made = " [already made]" if check.get("already_made") else ""
+                lines.append(f"     call: {json.dumps(check['call'], ensure_ascii=False)}{made}")
+            lines.append(f"     confirms if: {check['confirms_if']}")
+            lines.append(f"     refuted if: {check['refuted_if']}")
     return "\n".join(lines)
+
+
+def check_counts(feedback: dict[str, Any] | None) -> dict[str, int]:
+    """Count a challenge's checks: all, repeated calls and facts already seen."""
+    checks = ((feedback or {}).get("challenge") or {}).get("checks", [])
+    return {
+        "checks": len(checks),
+        "already_made": sum(bool(check.get("already_made")) for check in checks),
+        "seen": sum("seen" in check for check in checks),
+    }
 
 
 async def run(args: argparse.Namespace, llm: StructuredStepClient) -> None:
@@ -196,10 +241,14 @@ async def run(args: argparse.Namespace, llm: StructuredStepClient) -> None:
     cases = cases[: args.limit] if args.limit else cases
     print(f"{len(cases)} reports for the {args.role} (split {args.split}).")
     out = args.out.open("w", encoding="utf-8") if args.out else None
+    totals = {"recorded": Counter[str](), "replayed": Counter[str]()}
     try:
         for case in cases:
             answer = await side_turn(case, llm)
             print(render(case, answer, args.wrong_below), flush=True)
+            if isinstance(answer, LocalAnswer):
+                totals["recorded"].update(check_counts(case.recorded))
+                totals["replayed"].update(check_counts(answer.feedback))
             if out is not None:
                 record: dict[str, Any] = {
                     "run_id": case.task.run_id,
@@ -218,6 +267,9 @@ async def run(args: argparse.Namespace, llm: StructuredStepClient) -> None:
     finally:
         if out is not None:
             out.close()
+    if args.role == CHALLENGER_ROLE:
+        for name, total in totals.items():
+            print(f"{name}: {dict(total)}")
 
 
 def main(argv: list[str] | None = None) -> None:
