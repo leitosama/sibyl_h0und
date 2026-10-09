@@ -27,6 +27,7 @@ from sibyl_h0und.models import (
 FINISH_TOOL = "finish_investigation"
 RESPONSE_FORMAT_NAME = "bluesec1_next_step"
 CHALLENGE_FORMAT_NAME = "bluesec1_challenge"
+REPORT_FORMAT_NAME = "bluesec1_report"
 # Keys under which a catalog entry may carry the JSON Schema of its arguments.
 ARGUMENT_SCHEMA_KEYS = (
     "parameters",
@@ -227,6 +228,23 @@ class ToolCatalog:
             schema.pop("$defs", None)
             schema["properties"]["checks"]["items"] = check
             self._formats[key] = _format(CHALLENGE_FORMAT_NAME, schema, definitions, strict)
+        return self._formats[key]
+
+    def report_format(self) -> dict[str, Any] | None:
+        """Build the strict response format of the reporter: one report call (ADR 0023).
+
+        Returns:
+            The format of a `finish_investigation` call with the catalog's own
+            argument schema, or `None` when the catalog gives no schema to hold
+            a report to.
+        """
+        key = ("report", frozenset())
+        if key not in self._formats:
+            schema = self._schemas[FINISH_TOOL]
+            if schema is None:
+                return None
+            branch, definitions, strict = _function_branch(FINISH_TOOL, schema)
+            self._formats[key] = _format(REPORT_FORMAT_NAME, branch, definitions, strict)
         return self._formats[key]
 
     def _allowed(self, tools: Iterable[str] | None) -> frozenset[str]:

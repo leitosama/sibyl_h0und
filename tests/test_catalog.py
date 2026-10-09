@@ -198,6 +198,24 @@ def test_challenge_schema_accepts_one_to_three_checks_of_the_given_tools() -> No
     assert not validator.is_valid({"hypothesis": "x", "checks": [{**check, "call": report}]})
 
 
+def test_report_schema_is_one_call_of_the_report_tool_with_its_own_arguments() -> None:
+    """The reporter can only submit a report, shaped by the task's own report schema."""
+    catalog = catalog_of(
+        {"name": "lookup_host", "parameters": LOOKUP_PARAMETERS},
+        {"name": "finish_investigation", "parameters": FINISH_PARAMETERS},
+    )
+    response_format = catalog.report_format()
+    assert response_format is not None
+    schema = schema_of(response_format)
+    validator = Draft202012Validator(schema)
+    submission = {"verdict": "malicious", "reasoning": "x"}
+
+    assert response_format["json_schema"]["strict"] is True
+    assert validator.is_valid({"tool": "finish_investigation", "submission": submission})
+    assert not validator.is_valid({"tool": "lookup_host", "host_id": "h", "page": None})
+    assert not validator.is_valid({"tool": "finish_investigation", "submission": {"x": 1}})
+
+
 def test_catalog_without_finish_investigation_is_rejected() -> None:
     """A task that cannot be finished is an error, not an endless investigation."""
     with pytest.raises(ValueError, match="finish_investigation"):

@@ -3,7 +3,8 @@
 Дизайн, который объединяет [#45](https://github.com/leitosama/sibyl_h0und/issues/45)
 (челленджер benign-вердикта) и [#39](https://github.com/leitosama/sibyl_h0und/issues/39)
 (репортёр с компактным дайджестом). Дайджест и челленджер приняты в
-[ADR 0022](adr/0022-benign-challenger.md); репортёр — пока гипотеза. Роли совпадают с кандидатами из
+[ADR 0022](adr/0022-benign-challenger.md), репортёр — в
+[ADR 0023](adr/0023-reporter.md). Роли совпадают с кандидатами из
 [architecture.md](architecture.md#роли): челленджер — «гипотезёр»,
 репортёр — «IR-аналитик».
 

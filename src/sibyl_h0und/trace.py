@@ -163,6 +163,21 @@ class TaskTrace:
             payload["feedback"] = feedback
         self.event(kind, tool=tool, payload=payload, **fields)
 
+    def report_written(
+        self, draft: dict[str, Any], report: dict[str, Any] | None, fallback: str | None
+    ) -> None:
+        """Write what the reporter made of the head's draft (ADR 0023).
+
+        Args:
+            draft: The head's report.
+            report: The reporter's report that is sent, or `None` when the draft is.
+            fallback: Why the draft is sent, or `None`.
+        """
+        payload: dict[str, Any] = {"draft": draft}
+        if report is not None:
+            payload["report"] = report
+        self.event("report_written", fallback=fallback, payload=payload)
+
     def tool_call(
         self, tool: str, arguments: dict[str, Any], response: dict[str, Any], duration_ms: int
     ) -> None:
@@ -268,13 +283,17 @@ class RecordedDraft:
 
     Attributes:
         calls_before: How many runtime calls came before it.
-        arguments: Arguments of the report call.
+        arguments: Arguments of the report call as the head wrote them, before
+            any reporter rewrite.
         finish_only: Whether only the report could be called by then.
+        feedback: The local answer the model got instead of a runtime call,
+            if the report was answered locally.
     """
 
     calls_before: int
     arguments: dict[str, Any]
     finish_only: bool = False
+    feedback: dict[str, Any] | None = None
 
 
 # Local answers to a report: the report never reached the runtime.
@@ -324,8 +343,17 @@ def read_task(path: Path) -> RecordedTask:
         agent decodes a live response, and the final scores.
     """
     task = RecordedTask()
-    kinds = ("task_start", "tool_call", "task_end", "finish_only", *REPORT_ANSWERS)
+    kinds = (
+        "task_start",
+        "tool_call",
+        "task_end",
+        "finish_only",
+        "report_written",
+        *REPORT_ANSWERS,
+    )
     finish_only = False
+    # The head's report behind the next sent report, when the reporter rewrote it.
+    head_draft: dict[str, Any] | None = None
     with path.open(encoding="utf-8") as lines:
         for line in lines:
             if not any(f'"kind": "{kind}"' in line for kind in kinds):
@@ -338,8 +366,14 @@ def read_task(path: Path) -> RecordedTask:
             payload = event.get("payload") or {}
             arguments = payload.get("arguments") or {}
             if kind in REPORT_ANSWERS or (kind == "tool_call" and event.get("tool") == FINISH_TOOL):
-                task.drafts.append(RecordedDraft(len(task.calls), arguments, finish_only))
-            if kind == "finish_only":
+                draft = head_draft if kind == "tool_call" and head_draft is not None else arguments
+                task.drafts.append(
+                    RecordedDraft(len(task.calls), draft, finish_only, payload.get("feedback"))
+                )
+                head_draft = None
+            if kind == "report_written":
+                head_draft = payload.get("draft") if "report" in payload else None
+            elif kind == "finish_only":
                 finish_only = True
             elif kind == "task_start":
                 task.observation = (payload.get("task") or {}).get("observation")

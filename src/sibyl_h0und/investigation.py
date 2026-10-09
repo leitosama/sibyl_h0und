@@ -18,7 +18,7 @@ from sibyl_h0und.catalog import FINISH_TOOL, ToolCatalog
 from sibyl_h0und.digest import evidence_digest
 from sibyl_h0und.ledger import GraphLedger
 from sibyl_h0und.llm import render_json
-from sibyl_h0und.models import Challenge
+from sibyl_h0und.models import Challenge, ToolCall
 from sibyl_h0und.outcome import ToolOutcome, decode_json
 from sibyl_h0und.trace import TaskTrace
 from sibyl_h0und.vocabulary import KNOWLEDGE_TOOL, KNOWLEDGE_TOOL_SPEC, shared
@@ -74,6 +74,44 @@ opened.
 
 Return exactly one JSON object matching the supplied schema, with no prose.
 """.strip()
+REPORTER_ROLE = "reporter"
+# The reporter writes the report the runtime receives, for the verdict the
+# investigation reached (ADR 0023). General principles only, like the challenger.
+REPORTER_PROMPT = """
+You are the incident responder who writes the final report of an investigation. The
+investigation has reached its verdict; your job is to make the report right for that
+verdict. You see the alert, every piece of evidence the investigation gathered, what is
+still unvisited, the investigation's draft report and, if one was raised, a reviewer's
+challenge to a benign draft.
+
+Write the report as one call of the report tool:
+- Keep the draft's verdict. Do not change it.
+- Cite only ids that appear in the alert or the evidence, and only entities that belong to
+  the incident. An entity the investigation visited is not part of the incident just
+  because it was visited; extra entities are penalized like missing ones.
+- Malicious: the response artifacts cover every stage the evidence establishes:
+  compromised hosts, accounts used, persistence, dropped or changed files, attacker
+  network endpoints. Give each entity one consistent action; use an observed kind for an
+  incident entity that needs no action. Keep what the draft got right, drop what the
+  evidence does not tie to the incident, and add incident entities the draft missed.
+- Benign: the legitimacy evidence cites the entities and relations that explain the
+  activity, with the property fields that show it; use only property fields the evidence
+  shows for that entity or relation.
+- The reasoning tells the chain in a few sentences: stages, techniques and entities; for
+  benign, why each suspicious-looking action is explained, including the reviewer's
+  challenge if there was one.
+
+Evidence layout: `hosts` groups each host with the entities and relations nearest to it;
+`between_hosts` holds relations that join entities of different hosts; `no_host` holds
+what no host reaches.
+
+Return exactly one JSON object matching the supplied schema, with no prose.
+""".strip()
+# What the reporter is told when its report cannot be sent.
+REPORT_REPAIR = (
+    "This report cannot be sent: {problem} Return the corrected report as one JSON object "
+    "matching the schema."
+)
 # What the head is told with the challenger's case.
 CHALLENGE_ANSWER = (
     "A benign verdict overrules the detection that raised this alert, so a reviewer who did "
@@ -118,6 +156,7 @@ class Review:
         messages: The side turn's whole request.
         response_format: The side turn's schema.
         model: Model that validates the side turn's reply.
+        repaired: Whether this turn is the one repair a reporter gets.
     """
 
     role: str
@@ -125,6 +164,7 @@ class Review:
     messages: list[dict[str, Any]]
     response_format: dict[str, Any]
     model: type[BaseModel]
+    repaired: bool = False
 
 
 @dataclass(frozen=True)
@@ -163,6 +203,12 @@ class Investigation:
         self._vocabulary = shared()
         self._report_refused = False
         self._benign_challenged = False
+        # The challenger's case the head was given, for the reporter.
+        self._challenge_record: dict[str, Any] | None = None
+        # Whether the report last sent is the reporter's rewrite of the head's.
+        self._rewritten = False
+        # Why the last report sent is the head's own, or `None` (ADR 0023).
+        self.report_fallback: str | None = None
         # A search scoped to a relation type lists an entity's relations by its id.
         self._relation_search = self.catalog.relation_search()
 
@@ -188,7 +234,8 @@ class Investigation:
         break the tool's schema, a knowledge lookup, an id the runtime never
         returned and a repeated call are answered locally. So is the first
         placeholder report (ADR 0018). The first benign report outside the
-        finish-only mode goes to the challenger first (ADR 0020, 0022).
+        finish-only mode goes to the challenger first (ADR 0020, 0022); a
+        report that is to be sent goes to the reporter first (ADR 0023).
 
         Args:
             tool: Tool the model chose.
@@ -244,11 +291,8 @@ class Investigation:
             feedback = self._vocabulary.lookup(arguments["query"], arguments.get("terms"))
             self.trace.local_answer("tool_knowledge", tool, arguments, feedback)
             return LocalAnswer(feedback)
-        decision = self._ledger.check(tool, arguments)
-        if decision.feedback is not None:
-            logger.warning("Answered {} locally: {}.", tool, decision.reason)
-            self.trace.local_answer(f"tool_{decision.reason}", tool, arguments, decision.feedback)
-            return LocalAnswer(decision.feedback)
+        if (known := self._ledger_answer(tool, arguments)) is not None:
+            return known
         if challenge:
             # Once: the model may still be right, and at the ceiling it cannot look further.
             self._benign_challenged = True
@@ -263,23 +307,125 @@ class Investigation:
                 self.catalog.challenge_format(tools),
                 Challenge,
             )
+        if tool == FINISH_TOOL and (report_format := self.catalog.report_format()) is not None:
+            logger.info("Asking the reporter to write the report.")
+            return Review(
+                REPORTER_ROLE, arguments, self._reporter_request(arguments), report_format, ToolCall
+            )
         return Send(arguments)
 
     def after_review(
         self, review: Review, reply: BaseModel | None, error: str | None = None
-    ) -> LocalAnswer:
+    ) -> LocalAnswer | Send | Review:
         """Answer the call a side turn was about.
 
         Args:
-            review: The side turn `before_call` asked for.
+            review: The side turn `before_call` or a previous `after_review` asked for.
             reply: The side turn's validated reply, or `None` when it failed.
             error: Why the side turn failed, if it did.
 
         Returns:
-            The local answer to the model's call.
+            The local answer to the model's call, the report to send, or one
+            repair turn of the reporter.
         """
+        if review.role == REPORTER_ROLE:
+            return self._report(review, reply if isinstance(reply, ToolCall) else None, error)
         challenge = reply if isinstance(reply, Challenge) else None
         return self._challenge(review.arguments, challenge, error)
+
+    def _reporter_request(self, draft: dict[str, Any]) -> list[dict[str, Any]]:
+        """Build the reporter's request: the alert, the evidence, the draft and any challenge."""
+        request: dict[str, Any] = {
+            "alert": self.alert,
+            "available_tools": self.catalog.specs_of([FINISH_TOOL]),
+            "evidence": evidence_digest(self._ledger),
+        }
+        if open_items := self._ledger.summary():
+            request["still_open"] = open_items
+        request["draft_report"] = draft
+        if self._challenge_record is not None:
+            request["challenge"] = self._challenge_record
+        return [
+            {"role": "system", "content": REPORTER_PROMPT},
+            {"role": "user", "content": render_json(request)},
+        ]
+
+    def _ledger_answer(self, tool: str, arguments: dict[str, Any]) -> LocalAnswer | None:
+        """Answer a call with an unknown id or a repeated call from GraphLedger, else `None`."""
+        decision = self._ledger.check(tool, arguments)
+        if decision.feedback is None:
+            return None
+        logger.warning("Answered {} locally: {}.", tool, decision.reason)
+        self.trace.local_answer(f"tool_{decision.reason}", tool, arguments, decision.feedback)
+        return LocalAnswer(decision.feedback)
+
+    def _report(
+        self, review: Review, reply: ToolCall | None, error: str | None
+    ) -> LocalAnswer | Send | Review:
+        """Send the reporter's report, ask it once to repair one, or send the draft.
+
+        Args:
+            review: The reporter turn.
+            reply: The reporter's report call, or `None` when the turn failed.
+            error: Why the turn failed, if it did.
+
+        Returns:
+            The report to send, the reporter's repair turn, or the ledger's
+            answer when the runtime already answered this very report.
+        """
+        draft = review.arguments
+        problem = error
+        report = None
+        if reply is not None:
+            report, problem = self._checked_report(draft, reply)
+        if report is not None:
+            if (known := self._ledger_answer(FINISH_TOOL, report)) is not None:
+                return known
+            self.trace.report_written(draft, report, None)
+            self._rewritten, self.report_fallback = report != draft, None
+            return Send(report)
+        if reply is not None and not review.repaired:
+            logger.warning("The reporter's report cannot be sent ({}); asking once more.", problem)
+            messages = [
+                *review.messages,
+                {
+                    "role": "assistant",
+                    "content": render_json({"tool": FINISH_TOOL, **reply.arguments}),
+                },
+                {"role": "user", "content": REPORT_REPAIR.format(problem=problem)},
+            ]
+            return Review(
+                review.role, draft, messages, review.response_format, review.model, repaired=True
+            )
+        logger.warning("Sending the investigation's own report: {}", problem)
+        self.trace.report_written(draft, None, problem)
+        self._rewritten, self.report_fallback = False, problem
+        return Send(draft)
+
+    def _checked_report(
+        self, draft: dict[str, Any], reply: ToolCall
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Check a reporter's report as any report is checked, and against the draft's verdict.
+
+        A report the runtime already answered passes here; the ledger answers it.
+
+        Returns:
+            The prepared report and `None`, or `None` and what is wrong with it.
+        """
+        if reply.tool != FINISH_TOOL:
+            return None, f"the reply must call {FINISH_TOOL}, not {reply.tool!r}."
+        try:
+            report = self.catalog.prepare(FINISH_TOOL, reply.arguments)
+        except ValueError as exc:
+            return None, str(exc)
+        if report_verdict(report) != report_verdict(draft):
+            return None, f"the verdict must stay {report_verdict(draft)!r}."
+        if (empty := report_problem(report)) is not None:
+            return None, empty
+        decision = self._ledger.check(FINISH_TOOL, report)
+        if decision.reason == "rejected" and decision.feedback is not None:
+            return None, decision.feedback["message"].removeprefix("Not sent to the runtime: ")
+        return report, None
 
     def _challenger_request(self, tools: list[str]) -> list[dict[str, Any]]:
         """Build the challenger's request: the alert, the tools and the evidence, once."""
@@ -315,10 +461,11 @@ class Investigation:
         checks = self._usable_checks(challenge) if challenge is not None else []
         fallback = error
         if checks:
+            self._challenge_record = {"hypothesis": challenge.hypothesis, "checks": checks}
             feedback: dict[str, Any] = {
                 "status": "error",
                 "message": f"Not sent to the runtime: {CHALLENGE_ANSWER}",
-                "challenge": {"hypothesis": challenge.hypothesis, "checks": checks},
+                "challenge": self._challenge_record,
             }
         else:
             fallback = fallback or "no usable check"
@@ -375,6 +522,10 @@ class Investigation:
         """
         self._ledger.record(tool, arguments, outcome)
         feedback = outcome.evidence()
+        if tool == FINISH_TOOL and self._rewritten:
+            # The model's history shows its own draft; the answer is about this report.
+            feedback["sent_report"] = arguments
+            feedback["note"] = "The reporter rewrote your report; this answer is about sent_report."
         if open_items := self._ledger.summary():
             fetched = arguments.get("entity_id")
             opened = open_items.get("entities_with_open_relations", [])
