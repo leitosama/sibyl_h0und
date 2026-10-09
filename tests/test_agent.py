@@ -447,12 +447,24 @@ CHALLENGE = Challenge.model_validate(
         "hypothesis": "entity-1 is a payload started by a remote session.",
         "checks": [
             {
+                "look_for": "Who started entity-1.",
+                "confirms_if": "A remote logon started it.",
                 "refuted_if": "A local interactive logon started it.",
-                "call": {"tool": "get_entity", "entity_id": "entity-1", "reasoning": "Parent."},
-            }
+                "source": {
+                    "call": {"tool": "get_entity", "entity_id": "entity-1", "reasoning": "Parent."}
+                },
+            },
+            {
+                "look_for": "The process id entity-1 ran under.",
+                "confirms_if": "It is the payload's.",
+                "refuted_if": "It is the updater's.",
+                "source": {"seen": {"evidence_id": "entity-1", "property_fields": ["pid"]}},
+            },
         ],
     }
 )
+# The head's answers to the checks, in the state of the report it submits next.
+CHECK_ANSWERS = "1: started by a remote logon -> confirms. 2: pid 42 -> confirms."
 
 
 def challenged_run(
@@ -467,9 +479,12 @@ def challenged_run(
         or [
             get_entity_step("entity-1"),
             benign_finish_step("entity-1", "pid"),
-            make_step("finish_investigation", submission=MALICIOUS_SUBMISSION),
+            make_step("finish_investigation", submission=MALICIOUS_SUBMISSION).model_copy(
+                update={"current_state": CHECK_ANSWERS}
+            ),
         ],
-        (CHALLENGE,),
+        # The check that repeats a call is asked once more; the same reply then stands.
+        (CHALLENGE, CHALLENGE),
         reports,
     )
     session = FakeSession()
@@ -487,11 +502,12 @@ def test_a_benign_report_is_challenged_from_the_evidence_and_costs_no_runtime_ca
 
     assert [name for name, _ in session.calls] == ["get_entity", "finish_investigation"]
     assert session.calls[1][1] == {"submission": MALICIOUS_SUBMISSION}
-    (side,) = llm.side_requests["challenger"]
+    side, _ = llm.side_requests["challenger"]
     assert "Signed vendor binary" not in json.dumps(side)
     assert '"pid": 42' in side[-1]["content"]
     answer = json.loads(llm.requests[2][-1]["content"])
     assert answer["challenge"]["hypothesis"] == CHALLENGE.hypothesis
+    assert [check["n"] for check in answer["challenge"]["checks"]] == [1, 2]
 
 
 def test_the_harness_rebuilds_the_challenger_turn_from_a_trace_the_agent_wrote(
@@ -502,7 +518,7 @@ def test_the_harness_rebuilds_the_challenger_turn_from_a_trace_the_agent_wrote(
     llm, _ = challenged_run(tmp_path)
 
     (case,) = load_cases(tmp_path / "traces")
-    replay_llm = FakeStepClient([], [CHALLENGE])
+    replay_llm = FakeStepClient([], [CHALLENGE, CHALLENGE])
     answer = asyncio.run(side_turn(case, replay_llm))
 
     assert replay_llm.side_requests["challenger"] == llm.side_requests["challenger"]
@@ -568,7 +584,7 @@ def test_the_reporters_report_reaches_the_runtime_after_one_repair(tmp_path: Pat
 def test_the_harness_replays_the_reporter_turn_as_the_agent_asked_it(tmp_path: Path) -> None:
     """Cut at the report that was sent, a saved task gives the reporter the head's draft,
     not the rewrite the runtime got, and asks what the live agent asked, the challenger's
-    recorded case included."""
+    recorded case and the head's answers to it included."""
     rewrite = {**MALICIOUS_SUBMISSION, "reasoning": "entity-1 ran the suspicious chain."}
     report = ToolCall.model_validate({"tool": FINISH_TOOL, "submission": rewrite})
     llm, session = challenged_run(tmp_path, reports=(report,))
@@ -579,5 +595,7 @@ def test_the_harness_replays_the_reporter_turn_as_the_agent_asked_it(tmp_path: P
 
     assert session.calls[-1][1] == {"submission": rewrite}
     assert case.review.arguments == {"submission": MALICIOUS_SUBMISSION}
+    (live,) = llm.side_requests["reporter"]
+    assert json.loads(live[-1]["content"])["challenge"]["answers"] == CHECK_ANSWERS
     assert replay_llm.side_requests["reporter"] == llm.side_requests["reporter"]
     assert answer == Send({"submission": rewrite})

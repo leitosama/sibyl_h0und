@@ -288,12 +288,14 @@ class RecordedDraft:
         finish_only: Whether only the report could be called by then.
         feedback: The local answer the model got instead of a runtime call,
             if the report was answered locally.
+        state: The model's `current_state` of the step that submitted it.
     """
 
     calls_before: int
     arguments: dict[str, Any]
     finish_only: bool = False
     feedback: dict[str, Any] | None = None
+    state: str | None = None
 
 
 # Local answers to a report: the report never reached the runtime.
@@ -349,9 +351,12 @@ def read_task(path: Path) -> RecordedTask:
         "task_end",
         "finish_only",
         "report_written",
+        "step",
         *REPORT_ANSWERS,
     )
     finish_only = False
+    # The state of the step that chose the next report.
+    state: str | None = None
     # The head's report behind the next sent report, when the reporter rewrote it.
     head_draft: dict[str, Any] | None = None
     with path.open(encoding="utf-8") as lines:
@@ -368,10 +373,15 @@ def read_task(path: Path) -> RecordedTask:
             if kind in REPORT_ANSWERS or (kind == "tool_call" and event.get("tool") == FINISH_TOOL):
                 draft = head_draft if kind == "tool_call" and head_draft is not None else arguments
                 task.drafts.append(
-                    RecordedDraft(len(task.calls), draft, finish_only, payload.get("feedback"))
+                    RecordedDraft(
+                        len(task.calls), draft, finish_only, payload.get("feedback"), state
+                    )
                 )
-                head_draft = None
-            if kind == "report_written":
+                head_draft, state = None, None
+            if kind == "step":
+                step = payload.get("step") or {}
+                state = step.get("current_state") if event.get("tool") == FINISH_TOOL else None
+            elif kind == "report_written":
                 head_draft = payload.get("draft") if "report" in payload else None
             elif kind == "finish_only":
                 finish_only = True

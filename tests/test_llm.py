@@ -243,7 +243,14 @@ def test_a_side_turn_sends_only_its_own_request_and_is_traced_by_role(tmp_path: 
     reply = json.dumps(
         {
             "hypothesis": "Dropped payload.",
-            "checks": [{"refuted_if": "No writer.", "call": {"tool": "get_entity"}}],
+            "checks": [
+                {
+                    "look_for": "Who wrote it.",
+                    "confirms_if": "A remote shell.",
+                    "refuted_if": "No writer.",
+                    "source": {"call": {"tool": "get_entity"}},
+                }
+            ],
         }
     )
     fake_openai = FakeOpenAI([step, "not-json", reply, step])

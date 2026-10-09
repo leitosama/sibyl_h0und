@@ -186,16 +186,24 @@ def test_challenge_schema_accepts_one_to_three_checks_of_the_given_tools() -> No
     response_format = catalog.challenge_format(["lookup_host"])
     validator = Draft202012Validator(schema_of(response_format))
     check = {
+        "look_for": "The logon that started it.",
+        "confirms_if": "A remote logon.",
         "refuted_if": "No logon.",
-        "call": {"tool": "lookup_host", "host_id": "h", "page": None},
+        "source": {"call": {"tool": "lookup_host", "host_id": "h", "page": None}},
+    }
+    seen = {
+        **check,
+        "source": {"seen": {"evidence_id": "h", "property_fields": ["os"]}},
     }
     report = {"tool": "finish_investigation", "submission": {"verdict": "benign", "reasoning": "x"}}
 
     assert response_format["json_schema"]["strict"] is True
-    assert validator.is_valid({"hypothesis": "Lateral movement.", "checks": [check]})
+    assert validator.is_valid({"hypothesis": "Lateral movement.", "checks": [check, seen]})
     assert not validator.is_valid({"hypothesis": "x", "checks": []})
     assert not validator.is_valid({"hypothesis": "x", "checks": [check] * 4})
-    assert not validator.is_valid({"hypothesis": "x", "checks": [{**check, "call": report}]})
+    assert not validator.is_valid(
+        {"hypothesis": "x", "checks": [{**check, "source": {"call": report}}]}
+    )
 
 
 def test_report_schema_is_one_call_of_the_report_tool_with_its_own_arguments() -> None:
