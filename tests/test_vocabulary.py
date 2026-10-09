@@ -31,6 +31,17 @@ def test_a_technique_id_brings_the_technique_and_the_software_documented_to_use_
     assert all({"id", "name"} == set(item) for item in match["software_using_it"])
 
 
+def test_a_technique_names_the_data_it_is_detected_in_when_attack_has_a_detection() -> None:
+    """A remote session technique points at the logon and connection behind it."""
+    (winrm, *_) = shared().lookup("T1021.006")["matches"]
+    (scanning, *_) = shared().lookup("T1590")["matches"]
+
+    assert {"Logon Session Creation", "Network Traffic Flow"} <= set(
+        winrm["data_components"]["Windows"]
+    )
+    assert "data_components" not in scanning
+
+
 def test_words_describing_behavior_find_the_technique_first() -> None:
     """A description of the behavior, not a name, leads to the technique."""
     matches = shared().lookup("rename system utility")["matches"]
