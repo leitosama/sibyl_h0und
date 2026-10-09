@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from sibyl_h0und.catalog import FINISH_TOOL, ToolCatalog
 from sibyl_h0und.digest import evidence_digest
-from sibyl_h0und.ledger import GraphLedger
+from sibyl_h0und.ledger import GraphLedger, listing
 from sibyl_h0und.llm import render_json
 from sibyl_h0und.models import Challenge, ToolCall
 from sibyl_h0und.outcome import ToolOutcome, decode_json
@@ -30,6 +30,17 @@ NON_ALERT_FIELDS = frozenset({"available_tools", "last_tool_result"})
 MIN_REPORT_REASONING = 20
 # The list a report of each verdict must not leave empty.
 REPORT_CITATIONS = {"malicious": "ir_artifacts", "benign": "legitimacy_evidence"}
+# The entity type each response kind acts on, as the organizers' SC-0045 report
+# shows. Only these pairs are checked; another kind or entity type is the
+# model's call, so a type renamed on the competition day passes (ADR 0024).
+KIND_ENTITY_TYPES = {
+    "host_to_isolate": "host",
+    "identity_to_rotate": "windows_user",
+    "file_to_delete": "windows_file",
+    "network_block": "network_connection",
+    "process_observed": "windows_process",
+}
+CHECKED_ENTITY_TYPES = frozenset(KIND_ENTITY_TYPES.values())
 # Asked once before a benign report reaches the runtime: practice runs called
 # attacks benign after a look at the trigger alone (ADR 0020).
 BENIGN_CHALLENGE = (
@@ -95,6 +106,11 @@ Write the report as one call of the report tool:
   network endpoints. Give each entity one consistent action; use an observed kind for an
   incident entity that needs no action. Keep what the draft got right, drop what the
   evidence does not tie to the incident, and add incident entities the draft missed.
+  Cite each artifact by its entity id, never by a property value such as a SID, an
+  account name or an AD object id. A kind acts on its own entity type:
+  `host_to_isolate` on a host, `identity_to_rotate` on a windows_user,
+  `file_to_delete` on a windows_file (not the process), `network_block` on a
+  network_connection (not the remote host), `process_observed` on a windows_process.
 - Benign: the legitimacy evidence cites the entities and relations that explain the
   activity, with the property fields that show it; use only property fields the evidence
   shows for that entity or relation.
@@ -203,6 +219,7 @@ class Investigation:
         self._ledger.observe_alert(self.alert)
         self._vocabulary = shared()
         self._report_refused = False
+        self._citations_refused = False
         self._benign_challenged = False
         # The challenger's case the head was given, for the reporter.
         self._challenge_record: dict[str, Any] | None = None
@@ -233,10 +250,12 @@ class Investigation:
 
         A tool outside the catalog or outside the allowed set, arguments that
         break the tool's schema, a knowledge lookup, an id the runtime never
-        returned and a repeated call are answered locally. So is the first
-        placeholder report (ADR 0018). The first benign report outside the
-        finish-only mode goes to the challenger first (ADR 0020, 0022); a
-        report that is to be sent goes to the reporter first (ADR 0023).
+        returned and a repeated call are answered locally. So are the first
+        placeholder report (ADR 0018) and the first report whose citations are
+        not entities of the graph or act on the wrong type (ADR 0024). The
+        first benign report outside the finish-only mode goes to the challenger
+        first (ADR 0020, 0022); a report that is to be sent goes to the
+        reporter first (ADR 0023).
 
         Args:
             tool: Tool the model chose.
@@ -294,6 +313,22 @@ class Investigation:
             return LocalAnswer(feedback)
         if (known := self._ledger_answer(tool, arguments)) is not None:
             return known
+        if (
+            tool == FINISH_TOOL
+            and not self._citations_refused
+            and (citations := citation_problems(arguments, self._ledger))
+        ):
+            # Refused once, like a placeholder: the ledger may miss how an entity is named.
+            self._citations_refused = True
+            message = f"Not sent to the runtime: {' '.join(citations)} Submit the report again."
+            if challenge:
+                # One refusal, not two in a row with different reasons.
+                self._benign_challenged = True
+                message = f"{message} {BENIGN_CHALLENGE}"
+            feedback = {"status": "error", "message": message}
+            logger.warning("Refused report citations once: {}", citations)
+            self.trace.local_answer("citations_refused", tool, arguments, feedback)
+            return LocalAnswer(feedback)
         if challenge:
             # Once: the model may still be right, and at the ceiling it cannot look further.
             self._benign_challenged = True
@@ -426,6 +461,13 @@ class Investigation:
         decision = self._ledger.check(FINISH_TOOL, report)
         if decision.reason == "rejected" and decision.feedback is not None:
             return None, decision.feedback["message"].removeprefix("Not sent to the runtime: ")
+        citations = citation_problems(report, self._ledger)
+        if self._citations_refused:
+            # The head was told once and kept these citations: they are its call.
+            kept = set(citation_problems(draft, self._ledger))
+            citations = [problem for problem in citations if problem not in kept]
+        if citations:
+            return None, " ".join(citations)
         return report, None
 
     def _challenger_request(self, tools: list[str]) -> list[dict[str, Any]]:
@@ -568,6 +610,86 @@ def report_problem(arguments: dict[str, Any]) -> str | None:
     if citations is not None and report.get(citations) == []:
         return f"a {report['verdict']} report must cite entities in `{citations}`."
     return None
+
+
+def citation_problems(arguments: dict[str, Any], ledger: GraphLedger) -> list[str]:
+    """Find report citations that are not entities of the incident graph (ADR 0024).
+
+    A response artifact and a legitimacy anchor must name an entity or a
+    relation the runtime returned, not one of its property values such as a
+    SID, an account name or an AD object id. A response kind with a known
+    entity type must act on an entity of that type, when the cited entity's
+    type is one of the known types too.
+
+    Args:
+        arguments: Prepared arguments of the report tool.
+        ledger: What the runtime returned in this task.
+
+    Returns:
+        One sentence per problem, empty for a report that can be sent.
+    """
+    report = find_report(arguments)
+    if report is None:
+        return []
+    problems: list[str] = []
+    kinds: dict[str, list[str]] = {}
+    for item in _dicts(report.get("ir_artifacts")):
+        entity_id, kind = item.get("entity_id"), item.get("kind")
+        if not isinstance(entity_id, str):
+            continue
+        if isinstance(kind, str) and kind not in kinds.setdefault(entity_id, []):
+            kinds[entity_id].append(kind)
+        expected = KIND_ENTITY_TYPES.get(kind) if isinstance(kind, str) else None
+        actual = ledger.entity_type(entity_id)
+        if entity_id in ledger.relations:
+            problem = (
+                f"ir_artifacts cites {entity_id!r} as `{kind}`, but it is a relation: cite "
+                "the entity the action is taken on."
+            )
+        elif not ledger.is_entity(entity_id):
+            problem = (
+                f"ir_artifacts cites {entity_id!r} as `{kind}`, but it is no entity the runtime "
+                "returned, only a value seen in a response (such as a SID, an account name "
+                "or an AD object id): cite the entity's own id."
+            )
+        elif expected is not None and actual in CHECKED_ENTITY_TYPES and actual != expected:
+            problem = f"`{kind}` acts on a {expected} entity, but {entity_id!r} is a {actual}."
+        else:
+            continue
+        if expected is not None:
+            known = ledger.entities_of_type(expected)
+            problem += (
+                f" Known {expected} entities, cite only the one the action is taken on: "
+                f"{listing(known)}."
+                if known
+                else f" No {expected} entity is known yet."
+            )
+        problems.append(problem)
+    problems.extend(
+        f"ir_artifacts gives {entity_id!r} several kinds ({', '.join(cited)}): give each "
+        "entity one consistent action."
+        for entity_id, cited in kinds.items()
+        if len(cited) > 1
+    )
+    for item in _dicts(report.get("legitimacy_evidence")):
+        entity_id, relation_id = item.get("entity_id"), item.get("relation_id")
+        if isinstance(entity_id, str) and not ledger.is_entity(entity_id):
+            problems.append(
+                f"legitimacy_evidence anchors {entity_id!r} as an entity, but it is no entity "
+                "the runtime returned, only a value seen in a response: anchor the entity "
+                "that holds it."
+            )
+        if isinstance(relation_id, str) and relation_id not in ledger.relations:
+            problems.append(
+                f"legitimacy_evidence anchors {relation_id!r} as a relation, but the runtime "
+                "never returned a relation with this id."
+            )
+    return problems
+
+
+def _dicts(value: Any) -> list[dict[str, Any]]:
+    """Return the dicts of a list, or nothing when the value is not a list."""
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def find_report(arguments: dict[str, Any]) -> dict[str, Any] | None:
