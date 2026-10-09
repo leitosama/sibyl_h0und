@@ -30,17 +30,19 @@ DROPPED_FILE = {
 
 REPORT = {
     "verdict": "malicious",
-    "ir_artifacts": [{"entity_id": "file-1", "kind": "host_to_isolate"}],
+    "ir_artifacts": [{"entity_id": "file-1", "kind": "file_to_delete"}],
     "reasoning": "Script dropped into System32.",
 }
 
 
-def observation(specs: list[dict[str, Any]] = CATALOG) -> dict[str, Any]:
-    """Build a task observation whose alert names `file-1`."""
+def observation(
+    specs: list[dict[str, Any]] = CATALOG, entities: tuple[str, ...] = ("file-1",)
+) -> dict[str, Any]:
+    """Build a task observation whose alert names these entities."""
     return {
         "available_tools": json.dumps(specs),
         "last_tool_result": '""',
-        "alert_text": json.dumps({"trigger_entities": [{"id": "file-1"}]}),
+        "alert_text": json.dumps({"trigger_entities": [{"id": item} for item in entities]}),
     }
 
 
@@ -99,6 +101,88 @@ def test_a_report_that_says_nothing_is_refused_once(report: dict[str, Any], miss
     assert isinstance(refused, LocalAnswer)
     assert missing in refused.feedback["message"]
     assert to_reporter(again) == {"submission": report}
+
+
+RUNNING_PROCESS = {
+    "id": "proc-1",
+    "type": "windows_process",
+    "host_id": "host-1",
+    "properties": {"image": "C:\\Windows\\System32\\run.exe", "user_sid": "S-1-5-21-1004"},
+}
+
+
+def fetched_graph_investigation() -> Investigation:
+    """An investigation that fetched the alert's file and process; the host is only named."""
+    investigation = Investigation(observation(entities=("file-1", "proc-1")))
+    for entity in (DROPPED_FILE, RUNNING_PROCESS):
+        sent = investigation.before_call("get_entity", get_entity(entity["id"]))
+        assert isinstance(sent, Send)
+        investigation.after_call("get_entity", sent.arguments, ToolOutcome("ok", entity))
+    return investigation
+
+
+def artifacts(*cited: tuple[str, str]) -> dict[str, Any]:
+    """Report call arguments of a malicious report with these (entity id, kind) artifacts."""
+    items = [{"entity_id": entity_id, "kind": kind} for entity_id, kind in cited]
+    return {"submission": {**REPORT, "ir_artifacts": items}}
+
+
+@pytest.mark.parametrize(
+    ("cited", "hint"),
+    [
+        ([("S-1-5-21-1004", "identity_to_rotate")], "only as a property value"),
+        ([("proc-1", "file_to_delete")], "Known windows_file entities: ['file-1']"),
+        ([("file-1", "file_to_delete"), ("file-1", "file_observed")], "two kinds"),
+    ],
+    ids=["sid-as-identity", "process-as-file", "two-kinds"],
+)
+def test_an_artifact_that_is_no_entity_or_the_wrong_type_is_refused_once(
+    cited: list[tuple[str, str]], hint: str
+) -> None:
+    """A SID or a mismatched kind earns nothing; the model is told the entity to cite,
+    and a second report goes on as is."""
+    investigation = fetched_graph_investigation()
+
+    refused = investigation.before_call(FINISH_TOOL, artifacts(*cited))
+    again = investigation.before_call(FINISH_TOOL, artifacts(*cited))
+
+    assert isinstance(refused, LocalAnswer)
+    assert hint in refused.feedback["message"]
+    assert to_reporter(again) == artifacts(*cited)
+
+
+@pytest.mark.parametrize(
+    "cited",
+    [
+        [("host-1", "host_to_isolate")],
+        [("proc-1", "persistence_to_remove")],
+        [("file-1", "file_to_delete"), ("proc-1", "process_observed")],
+    ],
+    ids=["host-named-by-host-id", "unchecked-kind", "matching-types"],
+)
+def test_entities_named_by_reference_and_unchecked_kinds_are_not_refused(
+    cited: list[tuple[str, str]],
+) -> None:
+    """A process's host is an entity even when never fetched, and a kind outside the
+    known pairs is the model's call."""
+    decision = fetched_graph_investigation().before_call(FINISH_TOOL, artifacts(*cited))
+
+    assert to_reporter(decision) == artifacts(*cited)
+
+
+def test_a_legitimacy_anchor_on_a_property_value_is_refused_once() -> None:
+    """Benign evidence anchors the entity that holds a value, not the value itself."""
+    investigation = fetched_graph_investigation()
+    anchor = {"anchor": "entity", "entity_id": "S-1-5-21-1004", "property_fields": ["user_sid"]}
+    report = {"submission": {**BENIGN_REPORT, "legitimacy_evidence": [anchor]}}
+
+    refused = investigation.before_call(FINISH_TOOL, report)
+    again = investigation.before_call(FINISH_TOOL, report)
+
+    assert isinstance(refused, LocalAnswer)
+    assert "anchor the entity that holds it" in refused.feedback["message"]
+    assert isinstance(again, Review)
+    assert again.role == "challenger"
 
 
 BENIGN_REPORT = {
@@ -243,10 +327,21 @@ def test_the_reporters_report_is_sent_and_it_sees_the_draft_evidence_and_challen
             report_call({**REPORT, "ir_artifacts": [{"entity_id": "file-404", "kind": "other"}]}),
             "file-404",
         ),
+        (
+            report_call(
+                {
+                    **REPORT,
+                    "ir_artifacts": [
+                        {"entity_id": DROPPED_FILE["properties"]["path"], "kind": "file_to_delete"}
+                    ],
+                }
+            ),
+            "property value",
+        ),
         (report_call({**REPORT, "reasoning": "Short test"}), "reasoning"),
         (ToolCall.model_validate({"tool": "get_entity", "entity_id": "file-1"}), "must call"),
     ],
-    ids=["verdict-changed", "invented-id", "placeholder", "another-tool"],
+    ids=["verdict-changed", "invented-id", "property-value", "placeholder", "another-tool"],
 )
 def test_an_unusable_report_is_repaired_once_then_the_draft_is_sent(
     tmp_path: Path, reply: ToolCall, problem: str

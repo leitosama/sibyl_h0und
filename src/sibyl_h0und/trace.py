@@ -150,7 +150,7 @@ class TaskTrace:
         """Write a call answered without the runtime.
 
         Args:
-            kind: `tool_rejected`, `tool_invalid`, `report_refused`,
+            kind: `tool_rejected`, `tool_invalid`, `report_refused`, `citations_refused`,
                 `benign_challenged`, `tool_cached` or `tool_knowledge` (the lookup
                 and its answer).
             tool: Tool the model asked for.
@@ -297,7 +297,7 @@ class RecordedDraft:
 
 
 # Local answers to a report: the report never reached the runtime.
-REPORT_ANSWERS = ("report_refused", "benign_challenged")
+REPORT_ANSWERS = ("report_refused", "citations_refused", "benign_challenged")
 
 
 @dataclass
