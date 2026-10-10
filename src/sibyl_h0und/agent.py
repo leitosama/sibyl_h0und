@@ -383,7 +383,7 @@ class SimpleSGRAgent:
             investigation.opening_message(),
         ]
 
-        # The alert stage (ADR 0027): the alert's entities and their relations,
+        # The alert stage (ADR 0029): the alert's entities and their relations,
         # opened before the first turn and shown as ordinary evidence.
         stage_calls = 0
         outcome: ToolOutcome | None = None

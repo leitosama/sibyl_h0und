@@ -110,7 +110,7 @@ the question. ATT&CK splits defense evasion into stealth and defense-impairment.
 An answer is what the evidence at the place to look shows: what happened and why it
 is or is not hostile. "Nothing seen" there answers only if that place was opened.
 """.strip()
-# Said once after the alert stage's calls in the model's history (ADR 0027).
+# Said once after the alert stage's calls in the model's history (ADR 0029).
 ALERT_STAGE_NOTE = (
     "Before your first turn, the harness made the calls above: it fetched each entity the "
     "alert names and listed its relations by a search on its id, all pages within an hour "
@@ -398,7 +398,7 @@ class Investigation:
         """Return the alert stage's next call, made before the model's first turn.
 
         The stage fetches each alert entity and lists its relations by a
-        search on its id (ADR 0027). Give the runtime's answer to each call
+        search on its id (ADR 0029). Give the runtime's answer to each call
         to `after_call` with `alert_stage=True`, then to this method.
 
         Args:

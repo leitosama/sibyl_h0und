@@ -217,7 +217,7 @@ class TaskTrace:
         """Write one runtime call with the full decoded `ToolCallResult` response.
 
         `alert_stage` marks a call the harness made before the first turn
-        (ADR 0027); older traces lack the field.
+        (ADR 0029); older traces lack the field.
         """
         self.event(
             "tool_call",

@@ -1,4 +1,4 @@
-"""The alert stage: the harness opens the alert's entities and their relations (ADR 0027).
+"""The alert stage: the harness opens the alert's entities and their relations (ADR 0029).
 
 Before the model's first turn, every entity the alert names is fetched once,
 and its relations, incoming and outgoing, are listed by a search on its id.
