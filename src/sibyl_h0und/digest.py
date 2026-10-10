@@ -8,6 +8,7 @@ picks which properties matter (ADR 0017).
 """
 
 from collections import deque
+from collections.abc import Collection
 from typing import Any
 
 from sibyl_h0und.ledger import GraphLedger, listing
@@ -18,7 +19,7 @@ HOST_TYPE = "host"
 ENDPOINT_KEYS = ("source_id", "target_id")
 
 
-def evidence_digest(ledger: GraphLedger) -> dict[str, Any]:
+def evidence_digest(ledger: GraphLedger, only: Collection[str] | None = None) -> dict[str, Any]:
     """Group the evidence by host, each group in walk order from the alert.
 
     Objects are walked breadth-first over the relations, starting from the
@@ -29,6 +30,9 @@ def evidence_digest(ledger: GraphLedger) -> dict[str, Any]:
 
     Args:
         ledger: The task's ledger.
+        only: Ids of the objects to show, such as those new since an earlier
+            view; all when `None`. Grouping still uses the whole graph, and a
+            host that is not shown itself is named by its id.
 
     Returns:
         `hosts`, `between_hosts` and `no_host`, each present only when non-empty.
@@ -51,12 +55,13 @@ def evidence_digest(ledger: GraphLedger) -> dict[str, Any]:
     groups: dict[str | None, dict[str, list[dict[str, Any]]]] = {
         host: {"entities": [], "relations": []} for host in [*hosts, None]
     }
+    shown = set(ledger.objects if only is None else only)
     for key in order:
-        if key not in host_set:
+        if key not in host_set and key in shown:
             groups[owner.get(key)]["entities"].append(_entity_view(ledger, entities[key]))
     between: list[dict[str, Any]] = []
     ranked = sorted(
-        relations.values(),
+        (value for key, value in relations.items() if key in shown),
         key=lambda item: min(rank.get(item.get(key), len(rank)) for key in ENDPOINT_KEYS),
     )
     for relation in ranked:
@@ -68,10 +73,15 @@ def evidence_digest(ledger: GraphLedger) -> dict[str, Any]:
             groups[next(iter(owners), None)]["relations"].append(relation)
 
     digest: dict[str, Any] = {}
-    if hosts:
-        digest["hosts"] = [
-            {"host": _entity_view(ledger, entities[host]), **groups[host]} for host in hosts
-        ]
+    if listed := [
+        {
+            "host": _entity_view(ledger, entities[host]) if host in shown else {"id": host},
+            **groups[host],
+        }
+        for host in hosts
+        if host in shown or any(groups[host].values())
+    ]:
+        digest["hosts"] = listed
     if between:
         digest["between_hosts"] = between
     if any(groups[None].values()):

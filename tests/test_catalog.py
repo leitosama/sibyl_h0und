@@ -224,6 +224,39 @@ def test_report_schema_is_one_call_of_the_report_tool_with_its_own_arguments() -
     assert not validator.is_valid({"tool": "finish_investigation", "submission": {"x": 1}})
 
 
+@pytest.mark.parametrize(
+    ("verdict", "ruled"),
+    [
+        ({"type": "string", "enum": ["malicious", "benign"]}, "benign"),
+        ({"type": "string", "enum": ["true_positive", "false_positive"]}, "false_positive"),
+        ({"$ref": "#/$defs/Verdict"}, "false_positive"),
+    ],
+    ids=["practice", "renamed", "by-reference"],
+)
+def test_ruling_schema_allows_only_the_report_tools_verdicts(
+    verdict: dict[str, Any], ruled: str
+) -> None:
+    """The challenger rules with a verdict the report can carry, whatever the task names
+    them and wherever its schema defines them (ADR 0003)."""
+    finish = json.loads(json.dumps(FINISH_PARAMETERS))
+    finish["$defs"]["Submission"]["properties"]["verdict"] = verdict
+    finish["$defs"]["Verdict"] = {
+        "anyOf": [{"const": "true_positive"}, {"const": "false_positive"}]
+    }
+    catalog = catalog_of({"name": "finish_investigation", "parameters": finish})
+    response_format = catalog.ruling_format()
+    validator = Draft202012Validator(schema_of(response_format))
+    check = {"n": 1, "observed": [{"evidence_id": "h", "property_fields": ["os"]}]}
+    ruling = {"checks": [{**check, "result": "refutes", "why": "x"}], "reasoning": "x"}
+
+    assert response_format["json_schema"]["strict"] is True
+    assert validator.is_valid({**ruling, "verdict": ruled})
+    assert not validator.is_valid({**ruling, "verdict": "suspicious"})
+    assert not validator.is_valid(
+        {**ruling, "verdict": ruled, "checks": [{**check, "result": "maybe", "why": "x"}]}
+    )
+
+
 def test_catalog_without_finish_investigation_is_rejected() -> None:
     """A task that cannot be finished is an error, not an endless investigation."""
     with pytest.raises(ValueError, match="finish_investigation"):

@@ -15,7 +15,7 @@ from bluesec1_client import (
     RunCapacityExceededError,
 )
 from sibyl_h0und.agent import SimpleSGRAgent
-from sibyl_h0und.investigation import CHALLENGER_ROLE
+from sibyl_h0und.investigation import CHALLENGER_ROLE, JUDGE_ROLE
 from sibyl_h0und.llm import OpenAIStructuredStepClient
 from sibyl_h0und.settings import Settings
 
@@ -143,10 +143,17 @@ def llm_client(settings: Settings) -> OpenAIStructuredStepClient:
 
 
 def role_models(settings: Settings) -> dict[str, str]:
-    """Return the models the settings give side turns instead of the default one."""
+    """Return the models the settings give side turns instead of the default one.
+
+    The challenger's ruling continues its own conversation, so it uses the
+    challenger's model (ADR 0025, 0027).
+    """
     if settings.llm_challenger_model is None:
         return {}
-    return {CHALLENGER_ROLE: settings.llm_challenger_model}
+    return {
+        CHALLENGER_ROLE: settings.llm_challenger_model,
+        JUDGE_ROLE: settings.llm_challenger_model,
+    }
 
 
 def load_settings() -> Settings:

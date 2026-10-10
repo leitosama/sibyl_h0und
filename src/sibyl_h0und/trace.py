@@ -151,8 +151,8 @@ class TaskTrace:
 
         Args:
             kind: `tool_rejected`, `tool_invalid`, `report_refused`, `citations_refused`,
-                `benign_challenged`, `tool_cached` or `tool_knowledge` (the lookup
-                and its answer).
+                `benign_challenged`, `verdict_refused`, `verdict_handed_back`,
+                `tool_cached` or `tool_knowledge` (the lookup and its answer).
             tool: Tool the model asked for.
             arguments: Arguments of the call.
             feedback: Answer shown to the model, if it is worth keeping.
@@ -162,6 +162,33 @@ class TaskTrace:
         if feedback is not None:
             payload["feedback"] = feedback
         self.event(kind, tool=tool, payload=payload, **fields)
+
+    def verdict_ruled(
+        self,
+        draft: dict[str, Any],
+        ruling: dict[str, Any] | None,
+        fallback: str | None,
+        *,
+        flipped: bool,
+    ) -> None:
+        """Write the challenger's ruling on the verdict of a report (ADR 0027).
+
+        Args:
+            draft: The head's report the ruling is about.
+            ruling: The ruling, or `None` when the report keeps its verdict.
+            fallback: Why there is no ruling, or `None`.
+            flipped: Whether the ruling gives the report another verdict.
+        """
+        payload: dict[str, Any] = {"draft": draft}
+        if ruling is not None:
+            payload["ruling"] = ruling
+        self.event(
+            "verdict_ruled",
+            verdict=(ruling or {}).get("verdict"),
+            flipped=flipped,
+            fallback=fallback,
+            payload=payload,
+        )
 
     def report_written(
         self, draft: dict[str, Any], report: dict[str, Any] | None, fallback: str | None
@@ -288,18 +315,24 @@ class RecordedDraft:
         finish_only: Whether only the report could be called by then.
         feedback: The local answer the model got instead of a runtime call,
             if the report was answered locally.
-        state: The model's `current_state` of the step that submitted it.
+        ruling: The challenger's ruling on this report, if it gave one.
     """
 
     calls_before: int
     arguments: dict[str, Any]
     finish_only: bool = False
     feedback: dict[str, Any] | None = None
-    state: str | None = None
+    ruling: dict[str, Any] | None = None
 
 
 # Local answers to a report: the report never reached the runtime.
-REPORT_ANSWERS = ("report_refused", "citations_refused", "benign_challenged")
+REPORT_ANSWERS = (
+    "report_refused",
+    "citations_refused",
+    "benign_challenged",
+    "verdict_refused",
+    "verdict_handed_back",
+)
 
 
 @dataclass
@@ -351,12 +384,12 @@ def read_task(path: Path) -> RecordedTask:
         "task_end",
         "finish_only",
         "report_written",
-        "step",
+        "verdict_ruled",
         *REPORT_ANSWERS,
     )
     finish_only = False
-    # The state of the step that chose the next report.
-    state: str | None = None
+    # The challenger's ruling on the next report.
+    ruling: dict[str, Any] | None = None
     # The head's report behind the next sent report, when the reporter rewrote it.
     head_draft: dict[str, Any] | None = None
     with path.open(encoding="utf-8") as lines:
@@ -374,13 +407,12 @@ def read_task(path: Path) -> RecordedTask:
                 draft = head_draft if kind == "tool_call" and head_draft is not None else arguments
                 task.drafts.append(
                     RecordedDraft(
-                        len(task.calls), draft, finish_only, payload.get("feedback"), state
+                        len(task.calls), draft, finish_only, payload.get("feedback"), ruling
                     )
                 )
-                head_draft, state = None, None
-            if kind == "step":
-                step = payload.get("step") or {}
-                state = step.get("current_state") if event.get("tool") == FINISH_TOOL else None
+                head_draft, ruling = None, None
+            if kind == "verdict_ruled":
+                ruling = payload.get("ruling")
             elif kind == "report_written":
                 head_draft = payload.get("draft") if "report" in payload else None
             elif kind == "finish_only":

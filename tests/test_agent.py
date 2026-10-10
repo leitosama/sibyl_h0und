@@ -18,7 +18,7 @@ from sibyl_h0und.agent import SYSTEM_PROMPT, SimpleSGRAgent
 from sibyl_h0und.catalog import FINISH_TOOL
 from sibyl_h0und.investigation import Send
 from sibyl_h0und.llm import NextStepRequestError
-from sibyl_h0und.models import PRACTICE_ARGUMENT_MODELS, Challenge, NextStep, ToolCall
+from sibyl_h0und.models import PRACTICE_ARGUMENT_MODELS, Challenge, NextStep, Ruling, ToolCall
 from sibyl_h0und.replay import load_tasks
 from sibyl_h0und.side_replay import load_cases, side_turn
 from sibyl_h0und.trace import TaskTrace
@@ -41,6 +41,7 @@ class FakeStepClient:
         steps: list[NextStep],
         challenges: tuple[Challenge, ...] = (),
         reports: tuple[ToolCall, ...] = (),
+        rulings: tuple[Ruling, ...] = (),
     ) -> None:
         """Store steps and side-turn replies in their expected request order.
 
@@ -49,10 +50,12 @@ class FakeStepClient:
             challenges: Prepared challenger replies.
             reports: Prepared reporter replies. With no reply left, a side
                 turn fails as a provider would.
+            rulings: Prepared replies of the challenger's ruling turn.
         """
         self.steps = list(steps)
         self.challenges = list(challenges)
         self.reports = list(reports)
+        self.rulings = list(rulings)
         self.requests: list[list[dict[str, Any]]] = []
         self.side_requests: dict[str, list[list[dict[str, Any]]]] = {}
         self.formats: list[dict[str, Any]] = []
@@ -93,7 +96,7 @@ class FakeStepClient:
             NextStepRequestError: When no reply is prepared.
         """
         self.side_requests.setdefault(role, []).append([dict(message) for message in messages])
-        replies = self.challenges if role == "challenger" else self.reports
+        replies = {"challenger": self.challenges, "judge": self.rulings}.get(role, self.reports)
         if not replies:
             raise NextStepRequestError("No valid reply.")
         return replies.pop(0)
@@ -463,8 +466,21 @@ CHALLENGE = Challenge.model_validate(
         ],
     }
 )
-# The head's answers to the checks, in the state of the report it submits next.
-CHECK_ANSWERS = "1: started by a remote logon -> confirms. 2: pid 42 -> confirms."
+RULING = Ruling.model_validate(
+    {
+        "checks": [
+            {"n": 1, "observed": [], "result": "not_observed", "why": "Not opened."},
+            {
+                "n": 2,
+                "observed": [{"evidence_id": "entity-1", "property_fields": ["pid"]}],
+                "result": "confirms",
+                "why": "pid 42 is the payload's.",
+            },
+        ],
+        "verdict": "malicious",
+        "reasoning": "entity-1 runs as the payload's process.",
+    }
+)
 
 
 def challenged_run(
@@ -472,6 +488,7 @@ def challenged_run(
     steps: list[NextStep] | None = None,
     max_runtime_calls: int = 95,
     reports: tuple[ToolCall, ...] = (),
+    rulings: tuple[Ruling, ...] = (),
 ) -> tuple[FakeStepClient, FakeSession]:
     """Run a task; by default its benign report is challenged and then turned malicious."""
     llm = FakeStepClient(
@@ -479,13 +496,12 @@ def challenged_run(
         or [
             get_entity_step("entity-1"),
             benign_finish_step("entity-1", "pid"),
-            make_step("finish_investigation", submission=MALICIOUS_SUBMISSION).model_copy(
-                update={"current_state": CHECK_ANSWERS}
-            ),
+            make_step("finish_investigation", submission=MALICIOUS_SUBMISSION),
         ],
         # The check that repeats a call is asked once more; the same reply then stands.
         (CHALLENGE, CHALLENGE),
         reports,
+        rulings,
     )
     session = FakeSession()
     agent = SimpleSGRAgent(llm, max_runtime_calls=max_runtime_calls, trace_dir=tmp_path / "traces")
@@ -581,13 +597,30 @@ def test_the_reporters_report_reaches_the_runtime_after_one_repair(tmp_path: Pat
     assert second[: len(first)] == first
 
 
+def test_the_harness_replays_the_ruling_turn_as_the_agent_asked_it(tmp_path: Path) -> None:
+    """Cut at the first report after the challenge, a saved task asks the challenger for the
+    ruling the live agent asked for, in the same conversation, and gets the same ruling."""
+    llm, _ = challenged_run(tmp_path, rulings=(RULING,))
+
+    (case,) = load_cases(tmp_path / "traces", role="judge")
+    replay_llm = FakeStepClient([], rulings=(RULING,))
+    asyncio.run(side_turn(case, replay_llm))
+
+    (live,) = llm.side_requests["judge"]
+    assert live[:2] == llm.side_requests["challenger"][-1][:2]
+    assert replay_llm.side_requests["judge"] == [live]
+    assert case.investigation.ruling is not None
+    assert case.investigation.ruling["verdict"] == "malicious"
+    assert "reporter" not in replay_llm.side_requests
+
+
 def test_the_harness_replays_the_reporter_turn_as_the_agent_asked_it(tmp_path: Path) -> None:
     """Cut at the report that was sent, a saved task gives the reporter the head's draft,
     not the rewrite the runtime got, and asks what the live agent asked, the challenger's
-    recorded case and the head's answers to it included."""
+    recorded case and ruling included."""
     rewrite = {**MALICIOUS_SUBMISSION, "reasoning": "entity-1 ran the suspicious chain."}
     report = ToolCall.model_validate({"tool": FINISH_TOOL, "submission": rewrite})
-    llm, session = challenged_run(tmp_path, reports=(report,))
+    llm, session = challenged_run(tmp_path, reports=(report,), rulings=(RULING,))
 
     (case,) = load_cases(tmp_path / "traces", role="reporter")
     replay_llm = FakeStepClient([], reports=(report,))
@@ -596,6 +629,8 @@ def test_the_harness_replays_the_reporter_turn_as_the_agent_asked_it(tmp_path: P
     assert session.calls[-1][1] == {"submission": rewrite}
     assert case.review.arguments == {"submission": MALICIOUS_SUBMISSION}
     (live,) = llm.side_requests["reporter"]
-    assert json.loads(live[-1]["content"])["challenge"]["answers"] == CHECK_ANSWERS
+    assert json.loads(live[-1]["content"])["ruling"]["checks"][1]["observed"] == [
+        {"evidence_id": "entity-1", "values": {"pid": 42}}
+    ]
     assert replay_llm.side_requests["reporter"] == llm.side_requests["reporter"]
     assert answer == Send({"submission": rewrite})

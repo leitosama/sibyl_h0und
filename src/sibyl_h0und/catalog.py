@@ -21,6 +21,8 @@ from sibyl_h0und.models import (
     CallSource,
     Challenge,
     ChallengeCheck,
+    Ruling,
+    RulingCheck,
     SeenSource,
     StepEnvelope,
     normalize_time_windows,
@@ -30,6 +32,11 @@ FINISH_TOOL = "finish_investigation"
 RESPONSE_FORMAT_NAME = "bluesec1_next_step"
 CHALLENGE_FORMAT_NAME = "bluesec1_challenge"
 REPORT_FORMAT_NAME = "bluesec1_report"
+RULING_FORMAT_NAME = "bluesec1_ruling"
+# How deep verdict values are followed through refs, so a cyclic schema ends.
+MAX_REF_DEPTH = 16
+# Verdicts a report may give when the report tool's schema names none.
+DEFAULT_VERDICTS = ("malicious", "benign")
 # Keys under which a catalog entry may carry the JSON Schema of its arguments.
 ARGUMENT_SCHEMA_KEYS = (
     "parameters",
@@ -243,6 +250,41 @@ class ToolCatalog:
             self._formats[key] = _format(CHALLENGE_FORMAT_NAME, schema, definitions, strict)
         return self._formats[key]
 
+    def verdicts(self) -> list[str]:
+        """Verdicts the report tool's schema allows, in schema order.
+
+        Returns:
+            Every `const` or `enum` value of a `verdict` property at any depth
+            of the `finish_investigation` schema, or the practice verdicts when
+            it names none (ADR 0003).
+        """
+        schema = self._schemas[FINISH_TOOL]
+        found: list[str] = []
+        _collect_verdicts(schema, schema, found)
+        return found or list(DEFAULT_VERDICTS)
+
+    def ruling_format(self) -> dict[str, Any]:
+        """Build the strict response format of the challenger's ruling (ADR 0027).
+
+        Returns:
+            OpenAI-compatible response format of a `Ruling` whose verdict is
+            one of the report tool's verdicts.
+        """
+        key = ("ruling", frozenset())
+        if key not in self._formats:
+            schema = Ruling.model_json_schema()
+            definitions = schema.pop("$defs")
+            fact = definitions["SeenFact"]
+            check = RulingCheck.model_json_schema()
+            check.pop("$defs", None)
+            check["properties"]["observed"]["items"] = fact
+            for node in (fact, check):
+                _strict_object(node)
+            schema["properties"]["checks"]["items"] = check
+            schema["properties"]["verdict"]["enum"] = self.verdicts()
+            self._formats[key] = _format(RULING_FORMAT_NAME, schema, {}, True)
+        return self._formats[key]
+
     def report_format(self) -> dict[str, Any] | None:
         """Build the strict response format of the reporter: one report call (ADR 0023).
 
@@ -299,6 +341,41 @@ def _format(
         "type": "json_schema",
         "json_schema": {"name": name, "strict": strict, "schema": schema},
     }
+
+
+def _collect_verdicts(node: Any, root: Any, found: list[str]) -> None:
+    """Add the string values a `verdict` property allows, at any depth, once each."""
+    if isinstance(node, list):
+        for item in node:
+            _collect_verdicts(item, root, found)
+        return
+    if not isinstance(node, dict):
+        return
+    verdict = (node.get("properties") or {}).get("verdict")
+    if verdict is not None:
+        for value in _allowed_values(verdict, root):
+            if value not in found:
+                found.append(value)
+    for value in node.values():
+        _collect_verdicts(value, root, found)
+
+
+def _allowed_values(node: Any, root: Any, depth: int = 0) -> list[str]:
+    """Read the strings a schema allows through `const`, `enum`, its alternatives and local refs."""
+    if not isinstance(node, dict) or depth > MAX_REF_DEPTH:
+        return []
+    values = [node.get("const"), *(node.get("enum") or [])]
+    found = [value for value in values if isinstance(value, str)]
+    for key in ("anyOf", "oneOf", "allOf"):
+        for option in node.get(key) or []:
+            found.extend(_allowed_values(option, root, depth + 1))
+    ref = node.get("$ref")
+    if isinstance(ref, str) and isinstance(root, dict):
+        for key in DEFINITION_KEYS:
+            if ref.startswith(f"#/{key}/"):
+                target = (root.get(key) or {}).get(ref.removeprefix(f"#/{key}/"))
+                found.extend(_allowed_values(target, root, depth + 1))
+    return found
 
 
 def _tool_name(spec: dict[str, Any]) -> str | None:
