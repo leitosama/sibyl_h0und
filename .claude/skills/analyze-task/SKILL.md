@@ -44,31 +44,25 @@ For the whole run: `digest_task.py <RUN_DIR> --summary` (needs
 
 ## 2. Triage with a cheap model
 
-Decide from the digest whether the task deserves a deep read. When the
-digest alone is not conclusive, spawn one subagent with `model: "sonnet"`
-(`"haiku"` for plain routine blocks), pass it only the digest text and ask:
-
-```
-This is the digest of one SOC investigation task done by an automated agent.
-Answer in one line: `DEEP` or `SKIP`, then a dash and a reason of at most 25
-words. DEEP when the digest shows a possible wrong verdict (a benign verdict
-whose challenge hypothesis names an unanswered check or an attack stage), a
-wasteful path (many calls with few citations), a refused answer that was
-accepted anyway, or errors that changed the outcome. SKIP when the numbers,
-the checks and the final state agree and nothing was left unexplained.
-```
+Spawn the `run-triage` agent (`.claude/agents/run-triage.md`, Sonnet, no
+tools) and pass it only the digest text. It answers one line,
+`DEEP - reason` or `SKIP - reason`; its criteria live in that file.
 
 Rules for the triage:
 
 - Pass the digest, not the trace path: the cheap model must not read files.
+- Record the answer: `digest_task.py <RUN_DIR> <NUMBER> --triage "<answer>"`
+  appends it to `analysis.log` in the run directory.
 - `SKIP` ends the analysis: report the task in one line, quoting the reason.
-- Several flagged tasks: one subagent per task, in the same turn.
+- Several flagged tasks: one agent per task, in the same turn.
 - The triage is advice. A benign verdict that was challenged and then sent
-  unchanged is still worth a look when `scores` are hidden.
+  unchanged is still worth a look when scores are not shown.
 
-## 3. Deep read (only after `DEEP`)
+## 3. Deep read (only after `DEEP`, and only on request)
 
-Read the event that the digest points at, not the file:
+The Opus read is expensive and never started by the monitor: run it when the
+user asks, with the `run-deep` agent (`.claude/agents/run-deep.md`, Opus) or
+by hand. Read the event that the digest points at, not the file:
 
 ```bash
 uv run python .claude/skills/analyze-task/digest_task.py <RUN_DIR> <NUMBER> --event <SEQ> --limit 3000
@@ -86,3 +80,6 @@ gate) and whether an ADR in `docs/adr/` already covers it.
   quote them to the user, never into agent code or prompts.
 - Without scores, do not call a verdict `correct` or `incorrect`; say what
   the evidence supports.
+- In graded mode (`mode=graded` in the digest, the `h0und1` token) the run's
+  metadata stays as `.env.h0und1` sets it: propose changes to code and
+  prompts only, never to the run label, agent name, arena or token.

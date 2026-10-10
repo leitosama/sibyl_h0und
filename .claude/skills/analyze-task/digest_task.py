@@ -5,6 +5,7 @@ Usage:
     uv run python digest_task.py RUN_DIR|latest NUMBER --event SEQ [--limit CHARS]
     uv run python digest_task.py RUN_DIR|latest --summary
     uv run python digest_task.py RUN_A --compare RUN_B
+    uv run python digest_task.py RUN_DIR|latest NUMBER --triage "DEEP - reason"
 
 `latest` is the newest run directory under `$TRACE_DIR` (default
 `~/.local/share/sibyl_h0und/traces`). The first form prints the digest; the
@@ -20,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from taskdigest import (  # noqa: E402
+    append_triage,
     build,
     find_trace,
     load_rows,
@@ -50,19 +52,29 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=2000, help="characters of the event payload")
     parser.add_argument("--summary", action="store_true", help="run table from monitor.jsonl")
     parser.add_argument("--compare", metavar="RUN_B", help="run table of RUN next to RUN_B")
+    parser.add_argument(
+        "--triage", metavar="TEXT", help="record `DEEP - reason` or `SKIP - reason` in analysis.log"
+    )
     args = parser.parse_args()
 
     if args.summary or args.compare:
         tables = [summarize(load_rows(resolve_run(args.run)))]
         if args.compare:
             tables.append(summarize(load_rows(resolve_run(args.compare))))
+        if len({t["mode"] for t in tables}) > 1:
+            print("WARNING: graded and practice runs differ in token, arena and statistics")
         width = max(len(k) for k in tables[0])
         for key in tables[0]:
             print(f"{key:<{width}}  " + "  |  ".join(t[key] for t in tables))
         return
     if args.number is None:
         parser.error("a task number is required without --summary or --compare")
-    path = find_trace(resolve_run(args.run), args.number)
+    run_dir = resolve_run(args.run)
+    path = find_trace(run_dir, args.number)
+    if args.triage is not None:
+        task, _ = build(path)
+        print(append_triage(run_dir, task, args.triage))
+        return
     if args.event is None:
         task, end = build(path)
         print(render(task, end))

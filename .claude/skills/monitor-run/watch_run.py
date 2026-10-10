@@ -1,6 +1,11 @@
 """Stream a run's trace directory: anomalies and totals only, every task in a log.
 
-Usage: uv run python watch_run.py [RUN_DIR] [--seen N] [--verbose]
+Usage: uv run python watch_run.py [RUN_DIR] [--seen N] [--verbose] [--mode graded|practice]
+
+The mode comes from the run's `agent_name` (`h0und1` is graded, the competition
+token; anything else is practice) unless `--mode` is given. In graded mode the
+scores are never shown and the watch is strictly read-only: it never starts or
+changes a run, and the run's metadata stays as `.env.h0und1` sets it.
 
 Without RUN_DIR the script waits for the first run directory created after it
 started, so start it together with `h0und`. Every finished task is appended to
@@ -23,13 +28,16 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "analyze-task"))
 
 from taskdigest import (  # noqa: E402
+    GRADED,
+    PRACTICE,
     Task,
+    deep_candidates,
     flags,
     metrics,
     percentile,
-    scores_hidden,
     structure_flags,
 )
+from taskdigest import hidden as scores_not_shown  # noqa: E402
 
 from sibyl_h0und.replay import DEFAULT_TRACES, DEFAULT_WRONG_BELOW  # noqa: E402
 
@@ -52,7 +60,7 @@ def wait_for_new_run(root: Path, started: float) -> Path:
 
 def task_line(task: Task, end: dict[str, Any]) -> tuple[str, dict[str, float | None]]:
     """Format one finished task and return its numbers for the totals."""
-    hidden = scores_hidden(end)
+    hidden = scores_not_shown(task, end)
     q = None if hidden else end.get("quality_score") or 0.0
     e = None if hidden else end.get("efficiency_score") or 0.0
     row = {
@@ -80,7 +88,7 @@ def task_line(task: Task, end: dict[str, Any]) -> tuple[str, dict[str, float | N
     )
     # Without scores `correct`/`incorrect` would be a guess from nothing.
     if q is None:
-        result = f"Result={task.verdict} (scores hidden)"
+        result = f"Result={task.verdict} (scores not shown, {task.mode})"
     else:
         result = f"Result={task.verdict} {'correct' if q >= DEFAULT_WRONG_BELOW else 'incorrect'}"
     return f"[{task.number:03d} {task.id}] {numbers}\n{result}", row
@@ -119,6 +127,28 @@ def totals_line(rows: list[dict[str, float | None]], last: int) -> str:
         f"llm={fmt('llm', '.1f')} llm_s={fmt('llm_s', '.0f')} ktok={fmt('ktok', '.0f')} "
         f"incorrect={incorrect}"
     )
+
+
+def mode_banner(task: Task) -> str:
+    """Name the mode once, with what it forbids; flag a `--mode` the traces contradict."""
+    head = f"MODE {task.mode} agent={task.agent} label={task.label} model={task.model}"
+    if task.mode_mismatch:
+        return f"MODE MISMATCH: --mode {task.mode} but the traces say agent={task.agent}. {head}"
+    if task.mode == GRADED:
+        return f"{head}: read-only; run metadata stays as .env.h0und1 sets it"
+    return head
+
+
+def digest_command(run_dir: Path, task: Task) -> str:
+    """Return the ready command that prints this task's digest."""
+    script = ".claude/skills/analyze-task/digest_task.py"
+    return f"digest: uv run python {script} {run_dir} {task.number}"
+
+
+def deep_line(run_dir: Path) -> str:
+    """List the tasks triaged DEEP so far (from `analysis.log`)."""
+    found = deep_candidates(run_dir)
+    return f"deep candidates: {', '.join(found) if found else 'none'}"
 
 
 def relative_flags(m: dict[str, Any], earlier: list[dict[str, Any]]) -> list[str]:
@@ -160,6 +190,13 @@ def main() -> None:
         del args[i : i + 2]
     verbose = "--verbose" in args
     args = [a for a in args if a != "--verbose"]
+    mode = None
+    if "--mode" in args:
+        i = args.index("--mode")
+        mode = args[i + 1]
+        if mode not in (GRADED, PRACTICE):
+            raise SystemExit("--mode must be graded or practice")
+        del args[i : i + 2]
     started = time.time()
     if args:
         run_dir = Path(args[0])
@@ -178,7 +215,7 @@ def main() -> None:
         for line in (log_path.read_text().splitlines() if log_path.exists() else [])
         if line.startswith("[")
     }
-    last_event, stalled = time.time(), False
+    last_event, stalled, announced = time.time(), False, False
     while True:
         for path in sorted(run_dir.glob("*.trace.jsonl")):
             if path in tasks and tasks[path].ended:
@@ -189,9 +226,12 @@ def main() -> None:
                 last_event, stalled = time.time(), False
                 event = json.loads(line)
                 if path not in tasks:
-                    tasks[path] = Task(number, event["task_id"])
+                    tasks[path] = Task(number, event["task_id"], mode)
                 task = tasks[path]
                 end = task.feed(event)
+                if event["kind"] == "task_start" and not announced:
+                    announced = True
+                    print(mode_banner(task), flush=True)
                 if end is None:
                     continue
                 text, row = task_line(task, end)
@@ -204,7 +244,7 @@ def main() -> None:
                 found = flags(task, end) + structure_flags(m) + relative_flags(m, earlier)
                 block = f"{text}\nflags={','.join(found) or '-'}"
                 if found:
-                    block += f"\n{why_lines(task)}"
+                    block += f"\n{why_lines(task)}\n{digest_command(run_dir, task)}"
                 with log_path.open("a") as log:
                     log.write(block + "\n")
                 record = {
@@ -214,7 +254,9 @@ def main() -> None:
                     "flags": found,
                     "model": task.model,
                     "label": task.label,
-                    "scores_hidden": scores_hidden(end),
+                    "mode": task.mode,
+                    "agent": task.agent,
+                    "scores_hidden": scores_not_shown(task, end),
                     **m,
                 }
                 with (run_dir / JSONL_NAME).open("a") as jsonl:
@@ -223,10 +265,12 @@ def main() -> None:
                     print(block, flush=True)
                 if len(rows) % TOTALS_EVERY == 0:
                     print(totals_line(rows[-TOTALS_EVERY:], number), flush=True)
+                    print(deep_line(run_dir), flush=True)
         if not stalled and time.time() - last_event > STALL_SECONDS:
             stalled = True
             if not agent_running():
                 print(f"RUN ENDED: {len(rows)} tasks, no h0und process", flush=True)
+                print(deep_line(run_dir), flush=True)
                 return
             minutes = STALL_SECONDS // 60
             print(f"STALL: no trace events for {minutes} min, h0und still runs", flush=True)

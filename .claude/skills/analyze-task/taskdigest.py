@@ -19,6 +19,14 @@ from sibyl_h0und.investigation import find_report
 from sibyl_h0und.replay import DEFAULT_WRONG_BELOW
 
 NOT_SHOWN = 160
+GRADED, PRACTICE = "graded", "practice"
+GRADED_AGENT = "h0und1"  # the competition token profile, `.env.h0und1` (ADR 0002)
+TRIAGE_LOG = "analysis.log"
+
+
+def mode_of_agent(agent_name: str) -> str:
+    """Return `graded` for the competition agent name, `practice` for any other."""
+    return GRADED if agent_name == GRADED_AGENT else PRACTICE
 
 
 def clip(value: Any, limit: int = NOT_SHOWN) -> str:
@@ -85,8 +93,12 @@ def alert_summary(observation: dict[str, Any]) -> str:
 class Task:
     """Everything the digest reports about one task, fed event by event."""
 
-    def __init__(self, number: int, task_id: str):
+    def __init__(self, number: int, task_id: str, mode: str | None = None):
         self.number, self.id = number, task_id[:8]
+        self.agent = ""
+        self.mode = mode or PRACTICE
+        self.mode_fixed = mode is not None
+        self.mode_mismatch = False
         self.verdict = "?"
         self.alert = ""
         self.model = ""
@@ -133,6 +145,12 @@ class Task:
             run = payload.get("run") or {}
             self.model = run.get("model") or ""
             self.label = run.get("run_label") or ""
+            self.agent = run.get("agent_name") or ""
+            detected = mode_of_agent(self.agent)
+            if self.mode_fixed:
+                self.mode_mismatch = detected != self.mode
+            else:
+                self.mode = detected
             self.ceiling = run.get("agent_max_runtime_calls")
         elif kind == "llm_call":
             role = event.get("role") or "?"
@@ -219,6 +237,11 @@ def scores_hidden(end: dict[str, Any]) -> bool:
     return not any(end.get(k) for k in ("quality_score", "efficiency_score", "total_reward"))
 
 
+def hidden(task: Task, end: dict[str, Any]) -> bool:
+    """Tell whether scores must not be shown: always in graded mode, else when unfilled."""
+    return task.mode == GRADED or scores_hidden(end)
+
+
 def flags(task: Task, end: dict[str, Any]) -> list[str]:
     """Name the reasons a finished task deserves a look; empty when it is routine."""
     found = []
@@ -236,7 +259,7 @@ def flags(task: Task, end: dict[str, Any]) -> list[str]:
         found.append("llm_errors")
     if end.get("completion_reason") != "terminated" or end.get("error"):
         found.append("not_terminated")
-    if not scores_hidden(end) and (end.get("quality_score") or 0.0) < DEFAULT_WRONG_BELOW:
+    if not hidden(task, end) and (end.get("quality_score") or 0.0) < DEFAULT_WRONG_BELOW:
         found.append("low_q")
     return found
 
@@ -368,7 +391,10 @@ def economy_lines(task: Task, m: dict[str, Any]) -> list[str]:
 
 def render(task: Task, end: dict[str, Any] | None) -> str:
     """Return the multi-line digest of a task for a reviewer."""
-    lines = [f"[{task.number:03d} {task.id}] model={task.model} verdict={task.verdict}"]
+    lines = [
+        f"[{task.number:03d} {task.id}] mode={task.mode} agent={task.agent} "
+        f"model={task.model} verdict={task.verdict}"
+    ]
     lines.append(f"alert: {task.alert}")
     if end:
         lines.append(
@@ -377,7 +403,9 @@ def render(task: Task, end: dict[str, Any] | None) -> str:
             f"tokens={end.get('llm_tokens')} duration_s={(end.get('duration_ms') or 0) / 1000:.0f} "
             f"flags={','.join(flags(task, end) + structure_flags(metrics(task, end))) or '-'}"
         )
-        if scores_hidden(end):
+        if task.mode == GRADED:
+            lines.append("scores: not used in graded mode")
+        elif scores_hidden(end):
             lines.append("scores: hidden by the runtime")
         else:
             q, e = end.get("quality_score") or 0.0, end.get("efficiency_score") or 0.0
@@ -425,6 +453,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, str]:
     repeats = sum(r["cached"] + r["same_args"] for r in rows) / max(len(rows), 1)
     return {
         "run": f"{first.get('label')} / {first.get('model')}",
+        "mode": ", ".join(sorted({r.get("mode", PRACTICE) for r in rows})) or "n/a",
         "tasks": str(len(rows)),
         "verdicts": ", ".join(f"{k} {v}" for k, v in verdicts.most_common()),
         "calls": stat("calls"),
@@ -440,13 +469,38 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, str]:
     }
 
 
-def build(path: Path) -> tuple[Task, dict[str, Any] | None]:
+def append_triage(run_dir: Path, task: Task, text: str) -> str:
+    """Append one triage line to `analysis.log` and return it.
+
+    `text` must start with DEEP or SKIP so that the candidate list stays exact.
+    """
+    verdict = text.strip().split(maxsplit=1)[0].upper() if text.strip() else ""
+    if verdict not in ("DEEP", "SKIP"):
+        raise SystemExit("triage must start with DEEP or SKIP")
+    line = f"[{task.number:03d} {task.id}] {task.mode} {clip(text, 220)}"
+    with (run_dir / TRIAGE_LOG).open("a") as log:
+        log.write(line + "\n")
+    return line
+
+
+def deep_candidates(run_dir: Path) -> list[str]:
+    """Return the task numbers triaged DEEP and not yet superseded by a SKIP."""
+    path = run_dir / TRIAGE_LOG
+    state: dict[str, bool] = {}
+    for line in path.read_text().splitlines() if path.exists() else []:
+        parts = line.split()
+        if len(parts) >= 4 and parts[0].startswith("["):
+            state[parts[0].lstrip("[")] = parts[3].upper() == "DEEP"
+    return [number for number, deep in state.items() if deep]
+
+
+def build(path: Path, mode: str | None = None) -> tuple[Task, dict[str, Any] | None]:
     """Replay one trace file into a Task and its `task_end` event, if any."""
     number = int(path.name.split("_", 1)[0])
     task: Task | None = None
     end = None
     for event in read_events(path):
-        task = task or Task(number, event["task_id"])
+        task = task or Task(number, event["task_id"], mode)
         end = task.feed(event) or end
     if task is None:
         raise SystemExit(f"{path}: no events")
