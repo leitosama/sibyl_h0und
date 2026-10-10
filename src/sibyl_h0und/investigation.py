@@ -110,6 +110,13 @@ the question. ATT&CK splits defense evasion into stealth and defense-impairment.
 An answer is what the evidence at the place to look shows: what happened and why it
 is or is not hostile. "Nothing seen" there answers only if that place was opened.
 """.strip()
+# Said once after the alert stage's calls in the model's history (ADR 0027).
+ALERT_STAGE_NOTE = (
+    "Before your first turn, the harness made the calls above: it fetched each entity the "
+    "alert names and listed its relations by a search on its id, all pages within an hour "
+    "of the alert's activity for an entity with many. Build on their results; repeating "
+    "them returns the same results."
+)
 CHALLENGER_ROLE = "challenger"
 # The challenger argues the opposite of a benign verdict from the evidence
 # alone (ADR 0022). Written from general principles: no program, port,
@@ -373,9 +380,6 @@ class Investigation:
         # A search scoped to a relation type lists an entity's relations by its id.
         self._relation_search = self.catalog.relation_search()
         self._stage = AlertStage(self.catalog, self.alert, self._ledger)
-        # The alert stage's call in flight and the runtime's answer to it.
-        self._stage_call: StageCall | None = None
-        self._stage_outcome: ToolOutcome | None = None
 
     def opening_message(self) -> dict[str, Any]:
         """Return the first user message: the alert and the tool catalog, once."""
@@ -390,19 +394,28 @@ class Investigation:
             ),
         }
 
-    def alert_stage_call(self) -> StageCall | None:
+    def alert_stage_call(self, outcome: ToolOutcome | None = None) -> StageCall | None:
         """Return the alert stage's next call, made before the model's first turn.
 
         The stage fetches each alert entity and lists its relations by a
         search on its id (ADR 0027). Give the runtime's answer to each call
-        to `after_call`, like any other, before asking for the next.
+        to `after_call` with `alert_stage=True`, then to this method.
+
+        Args:
+            outcome: The runtime's answer to the previous stage call, or
+                `None` for the first.
 
         Returns:
             The next call to send, or `None` when the stage is over.
         """
-        self._stage_call = self._stage.next_call(self._stage_outcome)
-        self._stage_outcome = None
-        return self._stage_call
+        return self._stage.next_call(outcome)
+
+    def alert_stage_summary(self) -> dict[str, Any]:
+        """Return the message that closes the alert stage: who made the calls, what is open."""
+        summary: dict[str, Any] = {"note": ALERT_STAGE_NOTE}
+        if open_items := self._ledger.summary():
+            summary["still_open"] = open_items
+        return {"role": "user", "content": render_json(summary)}
 
     def before_call(
         self,
@@ -1003,24 +1016,34 @@ class Investigation:
             checks.append({"n": len(checks) + 1, **item})
         return checks, problems
 
-    def after_call(self, tool: str, arguments: dict[str, Any], outcome: ToolOutcome) -> Reply:
+    def after_call(
+        self,
+        tool: str,
+        arguments: dict[str, Any],
+        outcome: ToolOutcome,
+        *,
+        alert_stage: bool = False,
+    ) -> Reply:
         """Learn from a runtime answer and build the message the model sees.
 
         The message carries the evidence, then `still_open` for what is known
-        but not yet visited. The ledger caches the evidence alone.
+        but not yet visited. The ledger caches the evidence alone. An alert
+        stage answer carries the evidence only: `alert_stage_summary` gives
+        `still_open` once, after the whole stage.
 
         Args:
             tool: Tool that was called.
             arguments: Arguments sent to the runtime, as `before_call` returned them.
             outcome: The runtime's answer to a non-terminal call.
+            alert_stage: Whether the alert stage made the call.
 
         Returns:
             The tool message content.
         """
         self._ledger.record(tool, arguments, outcome)
-        if self._stage_call == StageCall(tool, arguments):
-            self._stage_outcome = outcome
         feedback = outcome.evidence()
+        if alert_stage:
+            return Reply(feedback)
         if tool == FINISH_TOOL and self._rewritten:
             # The model's history shows its own draft; the answer is about this report.
             feedback["sent_report"] = arguments

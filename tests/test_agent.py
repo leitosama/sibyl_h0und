@@ -261,7 +261,9 @@ def test_agent_executes_fresh_structured_task_via_remote_session(tmp_path: Path)
     assert session.calls[0][1]["entity_id"] == "entity-1"
     assert session.calls[1][1] == {"submission": MALICIOUS_SUBMISSION}
     # Before the first turn the model already sees the alert stage's call and its evidence.
-    stage_call, stage_answer = llm.requests[0][2:]
+    stage_call, stage_answer, stage_summary = llm.requests[0][2:]
+    assert stage_summary["role"] == "user"
+    assert "Before your first turn" in stage_summary["content"]
     assert stage_call["tool_calls"][0]["function"]["name"] == "get_entity"
     assert stage_answer["role"] == "tool"
     assert stage_answer["tool_call_id"] == stage_call["tool_calls"][0]["id"]
