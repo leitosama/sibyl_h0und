@@ -19,12 +19,6 @@ from sibyl_h0und.outcome import ToolOutcome
 from sibyl_h0und.trace import TaskTrace, elapsed_ms, run_trace_dir, task_trace_path
 from sibyl_h0und.vocabulary import KNOWLEDGE_TOOL
 
-# The content of each alert-stage call in the model's history: the harness
-# made it, not the model (ADR 0027).
-ALERT_STAGE_NOTE = (
-    "Before the first turn, the harness opened the alert's entities and their relations. "
-    "This call is made; build on its result."
-)
 SYSTEM_PROMPT = f"""
 You are a senior SOC analyst investigating one security alert in an evidence graph.
 Your answer is a verdict (malicious or benign) and a report that names the entities
@@ -65,8 +59,8 @@ Stance:
 
 Method. Work through these phases. Keep `current_state` on the current phase, the open
 hypotheses and the evidence for and against each.
-1. Orient. Read the alert and open the entities it names, starting with the process
-   that triggered it.
+1. Orient. Read the alert and what the calls before your first turn show about the
+   entities it names and their relations; open what they left open.
 2. Map. Follow what the trigger did: child processes, scripts and commands, file writes
    and deletes, registry, service and task changes, network connections in either
    direction. Follow what led to it: the parent process, the user and logon, the job,
@@ -377,24 +371,23 @@ class SimpleSGRAgent:
         # The alert stage (ADR 0027): the alert's entities and their relations,
         # opened before the first turn and shown as ordinary evidence.
         stage_calls = 0
-        while budget.leaves_room() and (call := investigation.alert_stage_call()) is not None:
+        outcome: ToolOutcome | None = None
+        while budget.leaves_room() and (call := investigation.alert_stage_call(outcome)):
             stage_calls += 1
             tool_call_id = f"alert_stage_{stage_calls}"
-            messages.append(
-                assistant_call(tool_call_id, ALERT_STAGE_NOTE, call.tool, call.arguments)
-            )
+            messages.append(assistant_call(tool_call_id, "Alert stage.", call.tool, call.arguments))
             budget.record_runtime_call()
             response = await self._call_tool(
                 session, trace, call.tool, call.arguments, alert_stage=True
             )
             if response.task_result is not None:
                 return TaskResult.model_validate(response.task_result)
-            feedback = investigation.after_call(
-                call.tool, call.arguments, decode(response)
-            ).feedback
-            messages.append(tool_message(tool_call_id, feedback))
+            outcome = decode(response)
+            reply = investigation.after_call(call.tool, call.arguments, outcome, alert_stage=True)
+            messages.append(tool_message(tool_call_id, reply.feedback))
         if stage_calls:
             logger.info("The alert stage made {} runtime calls.", stage_calls)
+            messages.append(investigation.alert_stage_summary())
 
         while True:
             step_number = trace.next_step()
