@@ -17,12 +17,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "analyze-task"))
 
 from runview import (  # noqa: E402
-    TRIAGE_LOG,
     deep_candidates,
+    eta,
+    expected_total,
+    progress,
     read_rows,
+    run_tag,
     run_totals,
     short_count,
     symbol,
+    triage_answers,
 )
 
 CSS = """
@@ -60,15 +64,11 @@ def render(run_dir: Path) -> str:
     """Return the dashboard HTML for a run directory."""
     rows = read_rows(run_dir)
     first = rows[0] if rows else {}
-    graded = first.get("mode") == "graded"
-    t = run_totals(rows, 40 if graded or not rows else max(len(rows), 40))
+    mode = first.get("mode") or "practice"
+    tag = first.get("tag") or run_tag(run_dir.name, mode)
+    t = run_totals(rows, expected_total(mode, first.get("total")))
     deep = set(deep_candidates(run_dir))
-    triaged = set()
-    path = run_dir / TRIAGE_LOG
-    for line in path.read_text().splitlines() if path.exists() else []:
-        parts = line.split()
-        if parts and parts[0].startswith("["):
-            triaged.add(parts[0].lstrip("["))
+    triaged = set(triage_answers(run_dir))
     peak = max((r.get("tokens") or 0 for r in rows), default=1) or 1
     body = []
     for r in rows:
@@ -89,13 +89,13 @@ def render(run_dir: Path) -> str:
             f'<td><span class="bar" style="width:{width}px"></span> {tokens}</td>'
             f"<td>{(r.get('duration_s') or 0) / 60:.1f}m</td><td>{mark}</td></tr>"
         )
-    pct = round(100 * t["done"] / t["total"]) if t["total"] else 0
+    pct = min(100, round(100 * t["done"] / t["total"])) if t["total"] else 0
     kpis = [
-        (f"{t['done']}/{t['total']}", "tasks"),
+        (progress(t), "tasks"),
         (f"{t['ok']} / {t['warn']} / {t['fail']}", "✔ / ⚠ / ✖"),
         (f"{t['calls']:.0f}", "calls per task"),
         (short_count(t["tokens"]), "LLM tokens"),
-        (f"{t['eta_min']:.0f} min", "ETA"),
+        (eta(t), "ETA"),
         (", ".join(sorted(deep)) or "-", "DEEP candidates"),
     ]
     cards = "".join(
@@ -110,8 +110,9 @@ def render(run_dir: Path) -> str:
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f"<title>Run Monitor</title><style>{CSS}</style></head><body><main>"
-        f'<h1>Run Monitor</h1><p class="sub">{title or "no tasks yet"} · updated {stamp}</p>'
+        f"<title>Run {html.escape(tag)}</title><style>{CSS}</style></head><body><main>"
+        f"<h1>Run {html.escape(tag)}</h1>"
+        f'<p class="sub">{title or "no tasks yet"} · updated {stamp}</p>'
         f'<div class="kpis">{cards}</div>'
         f'<div class="progress"><i style="width:{pct}%"></i></div>'
         '<div class="wrap"><table><thead><tr><th>Task</th><th>Verdict</th><th>Flags</th>'

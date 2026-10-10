@@ -63,6 +63,20 @@ Each rule points to the ADR that explains it.
   `test-audit` skill if tests were written or changed. Fix every high and
   medium score finding before the PR.
 
+## Runs
+
+- Starting `h0und` in the background means arming `monitor-run` in the same
+  turn: `watch_run.py --follow`, one per session (it attaches to every run,
+  also to ones already alive). Do not start the run until it printed `Watching`
+  or the session already has it armed.
+- At most 2 runs are active at once and at most 5 start per 30 minutes;
+  `watch_run.py` prints `LIMIT` when a start would break either. A third run
+  waits.
+- A graded run (`.env.h0und1`, agent `h0und1`) keeps its metadata exactly as
+  the profile sets it: no label, name, arena or model flags. Graded runs are
+  recorded in `~/.local/share/sibyl_h0und/final_runs.jsonl`; never delete their
+  trace directories (`KEEP`).
+
 ## Decisions
 
 - A change that makes or reverses an architectural decision adds an ADR in

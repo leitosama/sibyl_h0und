@@ -14,15 +14,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from runview import (  # noqa: F401  (re-exported for the watcher and the CLI)
-    TRIAGE_LOG,
-    deep_candidates,
-    event_line,
-    run_totals,
-    short_count,
-    symbol,
-    totals_event_line,
-)
+from runview import TRIAGE_LOG
 
 from sibyl_h0und.catalog import FINISH_TOOL
 from sibyl_h0und.investigation import find_report
@@ -90,6 +82,24 @@ def reporter_change(payload: dict[str, Any], fallback: str | None) -> str:
     return f"+{added}/-{removed}ids,{changed}changed"
 
 
+def tool_error_message(event: dict[str, Any], payload: dict[str, Any]) -> str:
+    """Return what the runtime said about a failed call, clipped to one line.
+
+    The status alone is just `error`; the reason sits in the response as a JSON
+    string under `last_tool_result` (for example `Unknown entity_id '…'`).
+    """
+    if event.get("error"):
+        return clip(event["error"], 120)
+    observation = ((payload.get("response") or {}).get("observation")) or {}
+    text = observation.get("last_tool_result")
+    if isinstance(text, str):
+        with contextlib.suppress(ValueError, AttributeError):
+            text = json.loads(text).get("message", text)
+        if text:
+            return clip(text, 120)
+    return clip(event.get("status"), 120)
+
+
 def alert_summary(observation: dict[str, Any]) -> str:
     """Return the alert description from the task observation, clipped."""
     text = observation.get("alert_text")
@@ -105,6 +115,10 @@ class Task:
     def __init__(self, number: int, task_id: str, mode: str | None = None):
         self.number, self.id = number, task_id[:8]
         self.agent = ""
+        self.full_id = task_id
+        self.bad_ids = 0
+        self.run_id = ""
+        self.run_info: dict[str, Any] = {}
         self.mode = mode or PRACTICE
         self.mode_fixed = mode is not None
         self.mode_mismatch = False
@@ -148,10 +162,14 @@ class Task:
     def feed(self, event: dict[str, Any]) -> dict[str, Any] | None:
         """Take one event; return it when it ends the task."""
         kind, payload = event["kind"], event.get("payload") or {}
+        self.run_id = self.run_id or event.get("run_id") or ""
         if kind == "task_start":
             task = payload.get("task") or {}
             self.alert = alert_summary(task.get("observation") or {})
             run = payload.get("run") or {}
+            self.run_info = {
+                k: run.get(k) for k in ("agent_name", "run_label", "arena", "model", "role_models")
+            }
             self.model = run.get("model") or ""
             self.label = run.get("run_label") or ""
             self.agent = run.get("agent_name") or ""
@@ -202,10 +220,10 @@ class Task:
                 self._attempt(event, "sent")
             if event.get("status") != "ok":
                 self.tool_errors += 1
-                self.errors.append(
-                    f"seq={event.get('seq')} {event.get('tool')}: "
-                    f"{clip(event.get('error') or event.get('status'), 120)}"
-                )
+                message = tool_error_message(event, payload)
+                if message.lower().startswith("unknown "):
+                    self.bad_ids += 1
+                self.errors.append(f"seq={event.get('seq')} {event.get('tool')}: {message}")
         elif kind == "llm_error":
             self.llm_errors += 1
         elif kind == "tool_rejected":
@@ -264,6 +282,8 @@ def flags(task: Task, end: dict[str, Any]) -> list[str]:
         found.append("fallback")
     if task.tool_errors:
         found.append("tool_errors")
+    if task.bad_ids:
+        found.append("bad_id")
     if task.llm_errors:
         found.append("llm_errors")
     if end.get("completion_reason") != "terminated" or end.get("error"):

@@ -1,4 +1,4 @@
-"""Claude Code status line for a run: two lines, no model tokens, fast.
+"""Claude Code status line for the active runs: a line per run, no model tokens, fast.
 
 Configure in `.claude/settings.local.json`:
 
@@ -6,13 +6,13 @@ Configure in `.claude/settings.local.json`:
                     "command": "python3 .claude/skills/monitor-run/statusline.py",
                     "refreshInterval": 5}}
 
-The run is the newest directory under `$TRACE_DIR` (default
-`~/.local/share/sibyl_h0und/traces`), or `$MONITOR_RUN_DIR`. Finished tasks come
-from `monitor.jsonl` (written by `watch_run.py`); the running task is read from
-the tail of its trace. It prints nothing when there is no run, never raises.
+Runs are the newest directories under `$TRACE_DIR` (default
+`~/.local/share/sibyl_h0und/traces`) that have a live `h0und` process or a trace
+written in the last 15 minutes; `$MONITOR_RUN_DIR` pins one run. Finished tasks
+come from `monitor.jsonl` (written by `watch_run.py`); the running task is read
+from the tail of its trace. It prints nothing when there is no run, never raises.
 """
 
-import json
 import os
 import re
 import sys
@@ -23,46 +23,57 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "analyze-task"))
 
 from runview import (  # noqa: E402
-    COMPETITION_TASKS,
     deep_candidates,
+    eta,
+    expected_total,
+    match_runs,
+    progress,
     read_rows,
+    run_tag,
     run_totals,
+    run_ts,
     short_count,
     symbol,
 )
 
 QUIET_SECONDS = 300
+ACTIVE_SECONDS = 900
 TAIL_BYTES = 400_000
+MAX_RUNS = 3
+MAX_ACTIVE, MAX_STARTS = 2, 5
 RED, YELLOW, GREEN, GREY, RESET = "\033[31m", "\033[33m", "\033[32m", "\033[90m", "\033[0m"
 
 
-def run_dir() -> Path | None:
-    """Return the run directory to show, or None."""
-    chosen = os.environ.get("MONITOR_RUN_DIR")
-    if chosen:
-        return Path(chosen)
-    root = Path(os.environ.get("TRACE_DIR", "~/.local/share/sibyl_h0und/traces")).expanduser()
-    runs = [p for p in root.glob("*/") if p.is_dir()]
-    return max(runs, key=lambda p: p.stat().st_mtime) if runs else None
+def traces_root() -> Path:
+    """Return the traces directory."""
+    return Path(os.environ.get("TRACE_DIR", "~/.local/share/sibyl_h0und/traces")).expanduser()
+
+
+def run_dirs(root: Path) -> list[Path]:
+    """Return the run directories under `root`, newest first."""
+    runs = [p for p in root.glob("*/") if p.is_dir() and run_ts(p.name) is not None]
+    return sorted(runs, key=lambda p: run_ts(p.name) or 0.0, reverse=True)
+
+
+def last_write(directory: Path) -> float:
+    """Return the newest trace mtime in a run directory, 0 when it has none."""
+    return max((p.stat().st_mtime for p in directory.glob("*.trace.jsonl")), default=0.0)
 
 
 def running_task(directory: Path, done: set[int]) -> dict | None:
     """Return calls, head context, age and quiet time of the task being written, or None."""
-    files = sorted(directory.glob("*.trace.jsonl"))
-    for path in reversed(files):
+    for path in reversed(sorted(directory.glob("*.trace.jsonl"))):
         number = int(path.name.split("_", 1)[0])
         if number in done:
             continue
         data = path.read_bytes()
-        calls = data.count(b'"kind": "tool_call"')
-        tail = data[-TAIL_BYTES:]
-        context = re.findall(rb'"role": "head"[^\n]*?"tokens": (\d+)', tail)
+        context = re.findall(rb'"role": "head"[^\n]*?"tokens": (\d+)', data[-TAIL_BYTES:])
         first = re.search(rb'"ts": "([^"]+)"', data[:400])
         started = datetime.fromisoformat(first.group(1).decode()).timestamp() if first else None
         now = time.time()
         return {
             "number": number,
-            "calls": calls,
+            "calls": data.count(b'"kind": "tool_call"'),
             "context": int(context[-1]) if context else 0,
             "age": now - started if started else 0.0,
             "quiet": now - path.stat().st_mtime,
@@ -70,26 +81,23 @@ def running_task(directory: Path, done: set[int]) -> dict | None:
     return None
 
 
-def render(directory: Path) -> str:
-    """Return the status text for a run directory."""
+def run_lines(directory: Path, pid: int | None) -> list[str]:
+    """Return the status lines of one run: the totals line and, when running, the task."""
     rows = read_rows(directory)
     first = rows[0] if rows else {}
-    mode = first.get("mode") or "run"
+    mode = first.get("mode") or "practice"
+    tag = first.get("tag") or run_tag(directory.name, mode)
+    t = run_totals(rows, expected_total(mode, first.get("total")))
     color = RED if mode == "graded" else GREY
-    total = COMPETITION_TASKS if mode == "graded" else max(len(rows), COMPETITION_TASKS)
-    t = run_totals(rows, total)
     deep = deep_candidates(directory)
-    head = (
-        f"{color}{mode}{RESET} {first.get('agent', '')} · {t['done']}/{t['total']} · "
-        f"{GREEN}✔{t['ok']}{RESET} {YELLOW}⚠{t['warn']}{RESET} {RED}✖{t['fail']}{RESET} · "
-        f"⌀{t['calls']:.0f} calls · {short_count(t['tokens'])} tok · ETA {t['eta_min']:.0f}m"
-        + (f" · {YELLOW}DEEP {', '.join(deep)}{RESET}" if deep else "")
-    )
-    lines = [head]
     live = running_task(directory, {r["number"] for r in rows})
-    flagged = [r for r in rows if r.get("flags")][-3:]
-    parts = []
-    if live:
+    head = (
+        f"{color}{tag}{RESET} {first.get('agent', '')} {progress(t)} · "
+        f"{GREEN}✔{t['ok']}{RESET} {YELLOW}⚠{t['warn']}{RESET} {RED}✖{t['fail']}{RESET} · "
+        f"⌀{t['calls']:.0f} calls · {short_count(t['tokens'])} tok · ETA {eta(t)}"
+    )
+    parts = [head]
+    if live and pid is not None:
         quiet = live["quiet"] > QUIET_SECONDS
         state = (
             f"{YELLOW}quiet {live['quiet'] / 60:.0f}m{RESET}"
@@ -97,27 +105,44 @@ def render(directory: Path) -> str:
             else f"{live['age'] / 60:.0f}m"
         )
         parts.append(
-            f"#{live['number']:03d} now: {live['calls']} calls · ctx {short_count(live['context'])}"
-            f" · {state}"
+            f"#{live['number']:03d} {live['calls']}c ctx {short_count(live['context'])} {state}"
         )
-    for row in flagged:
-        parts.append(f"{symbol(row)}{row['number']:03d} {','.join(row['flags'][:2])}")
-    if parts:
-        lines.append(" · ".join(parts))
+    elif pid is None:
+        parts.append(f"{GREY}ended{RESET}")
+    if deep:
+        parts.append(f"{YELLOW}DEEP {','.join(deep)}{RESET}")
+    flagged = [f"{symbol(r)}{r['number']:03d}" for r in rows if r.get("flags")][-3:]
+    if flagged:
+        parts.append(" ".join(flagged))
+    return [" · ".join(parts)]
+
+
+def render(root: Path) -> str:
+    """Return the status text for the active runs under `root`."""
+    pinned = os.environ.get("MONITOR_RUN_DIR")
+    recent = [Path(pinned)] if pinned else run_dirs(root)[:12]
+    bound = match_runs(recent)
+    now = time.time()
+    active = [
+        d for d in recent if bound.get(d) is not None or now - last_write(d) < ACTIVE_SECONDS
+    ][:MAX_RUNS]
+    lines = []
+    for directory in active:
+        lines.extend(run_lines(directory, bound.get(directory)))
+    starts = sum(1 for d in run_dirs(root) if (run_ts(d.name) or 0) >= now - 1800)
+    alive = sum(1 for d in active if bound.get(d) is not None)
+    over = alive > MAX_ACTIVE or starts > MAX_STARTS
+    tail = f"starts 30m {starts}/{MAX_STARTS} · active {alive}/{MAX_ACTIVE}"
+    lines.append(f"{RED if over else GREY}{tail}{RESET}")
     return "\n".join(lines)
 
 
 def main() -> None:
     """Print the status line; stay silent on any problem."""
     try:
-        if not sys.stdin.isatty():
-            json.load(sys.stdin)
-    except ValueError:
-        pass
-    try:
-        directory = run_dir()
-        if directory is not None and directory.is_dir():
-            print(render(directory))
+        root = traces_root()
+        if root.is_dir():
+            print(render(root))
     except Exception:  # a status line must never break the session
         return
 

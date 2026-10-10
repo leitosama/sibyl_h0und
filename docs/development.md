@@ -32,6 +32,36 @@ uv run --env-file .env.h0und1 h0und   # зачёт 10 октября
 Если рядом лежит обычный `.env`, `settings.py` дочитывает из него значения,
 которых нет в профиле. Чтобы не путаться, держим только профили.
 
+### Наблюдение за run'ами
+
+Монитор поднимаем в том же ходу, что и run, один на сессию. Он подхватывает
+все run'ы под `TRACE_DIR`, в том числе уже запущенные:
+
+```bash
+uv run python -u .claude/skills/monitor-run/watch_run.py --follow
+```
+
+Лимиты финала: не больше 2 активных run'ов и 5 новых за 30 минут (монитор
+печатает `LIMIT`); run может быть любой комбинацией graded и practice. Размер
+очереди берётся из режима: graded — 40 задач, practice — 30 (`--total N`
+переопределяет). Режим определяется по `agent_name`: `h0und1` — graded.
+В graded монитор только читает, баллы не показывает, метаданные run'а остаются
+как в `.env.h0und1`.
+
+Каждый run получает метку (`G1019` — graded, `P1023` — practice; цифры — время
+создания каталога). Рядом с трассами монитор пишет `monitor.log`,
+`monitor.jsonl`, `analysis.log` (триаж) и `dashboard.html`. Для финальных
+(graded) run'ов он ведёт реестр `~/.local/share/sibyl_h0und/final_runs.jsonl`:
+полный `run_id`, `task_id`, имя файла трассы, вердикт, флаги и ответ триажа на
+каждую задачу, без текста алертов. Каталог такого run'а помечается файлом
+`KEEP` и не удаляется. Реестр читают так:
+
+```bash
+uv run python .claude/skills/analyze-task/digest_task.py --runs        # список
+uv run python .claude/skills/analyze-task/digest_task.py G1019 --runs  # задачи run'а
+uv run python .claude/skills/analyze-task/digest_task.py G1019 5       # дайджест задачи
+```
+
 ## Проверки
 
 То же, что гоняет CI (`.github/workflows/ci.yml`), без сети и ключей:
