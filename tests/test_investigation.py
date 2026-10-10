@@ -262,7 +262,7 @@ def test_the_first_benign_report_goes_to_the_challenger_without_the_heads_reason
 
 def test_the_head_and_the_challenger_ask_the_tactic_checks_of_the_attack_pack() -> None:
     """Both sides of a benign verdict get one check per ATT&CK tactic from initial access to
-    impact, named as the pack names them, so a check's tactic is a term the vocabulary knows."""
+    impact, named as the ATT&CK pack names them, so a pack update that renames a tactic shows."""
     review = fetched_file_investigation().before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
     assert isinstance(review, Review)
     tactics = {
