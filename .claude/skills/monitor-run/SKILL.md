@@ -44,29 +44,59 @@ start, stop or restart `h0und`, and propose changes to code and prompts only.
      first run directory created after it started (under `$TRACE_DIR`, default
      `~/.local/share/sibyl_h0und/traces`), so it never picks an older run.
    - Run already going, or the user named one: pass its directory.
-2. The script prints `Watching`, `MODE`, one block per flagged task (ending
-   with a ready `digest:` command), a totals line and `deep candidates:` every
-   5 finished tasks, `STALL` after 5 quiet minutes while `h0und` still runs,
-   and `RUN ENDED` (then exits) when the traces are quiet and `h0und` is gone.
-3. When the Monitor expires, re-arm it with the same `RUN_DIR`. Tasks already
-   in `monitor.log` are not printed again.
+2. The script prints single lines, each starting with a fixed keyword or glyph:
 
-## For each flagged block
+   | Line | Meaning | You do |
+   | --- | --- | --- |
+   | `MODE …` | mode, agent, label, model (once); `MODE MISMATCH` when `--mode` contradicts the traces | relay; push on MISMATCH |
+   | `⚠`/`✖ #NNN verdict · flags [gates] · calls · tok` + an indented reason | a flagged task | triage (below) |
+   | `Σ N/40 · ✔ ⚠ ✖ · ⌀calls · tok · ETA · DEEP: …` | totals every 5 tasks | relay |
+   | `DASHBOARD <RUN_DIR>` | every 10 tasks and at the end | refresh the dashboard (below) |
+   | `STALL …` | 5 quiet minutes while `h0und` runs | relay; push |
+   | `RUN ENDED …` | traces quiet and `h0und` gone (the script exits) | relay the `Σ` line; push |
+
+3. When the Monitor expires, re-arm it with the same `RUN_DIR`. Tasks already
+   in `monitor.log` and `monitor.jsonl` are not printed again.
+
+## What the user sees
+
+The user watches an interactive session, so each surface has one job and the
+prose is kept out:
+
+- **Status line** (no tokens): `statusline.py` shows progress, ✔/⚠/✖, ⌀calls,
+  tokens, ETA, the running task and DEEP candidates, refreshed by a timer.
+  Enable it once in `.claude/settings.local.json`:
+  `{"statusLine": {"type": "command", "command": "python3 .claude/skills/monitor-run/statusline.py", "refreshInterval": 5}}`.
+  `MONITOR_RUN_DIR` pins a run, otherwise the newest under `$TRACE_DIR`.
+- **Event lines**: copy the script's line verbatim, add only the triage
+  answer. No paths, no environment names, no prose around it.
+- **Sub-agent panel**: each triage is a background agent whose `description`
+  is `Triage #NNN flags`, all started in one turn.
+- **Push**: `PushNotification` with the event line on `DEEP`, `STALL`,
+  `RUN ENDED` and `MODE MISMATCH` only.
+- **Dashboard**: on `DASHBOARD <RUN_DIR>` run
+  `python3 .claude/skills/monitor-run/render_dashboard.py <RUN_DIR>` and publish
+  the printed `dashboard.html` with the Artifact tool, the same path each time
+  (icon `chart`; first publish only), so the URL stays one. The page holds
+  counts, flags and ids only.
+
+## For each flagged line
 
 Mechanical, no opinion of your own:
 
-1. Run the block's `digest:` command; keep its output as text.
-2. Spawn one `run-triage` agent (`model: sonnet`) per task with only that
-   text as the prompt. Several flagged blocks at once: all agents in one turn.
-   Never pass a trace path.
+1. Run `uv run python .claude/skills/analyze-task/digest_task.py <RUN_DIR> <N>`
+   (RUN_DIR is in the `Watching` line); keep its output as text.
+2. Spawn one `run-triage` agent (`model: sonnet`, description
+   `Triage #NNN <flags>`) per task with only that text as the prompt. Several
+   flagged lines at once: all agents in one turn. Never pass a trace path.
 3. Record the answer exactly as given:
    `uv run python .claude/skills/analyze-task/digest_task.py <RUN_DIR> <N> --triage "<answer>"`
    (appends to `analysis.log`; the answer must start with `DEEP` or `SKIP`).
-4. Tell the user one line: `[N id] flags -> <answer>`.
+4. Tell the user the event line plus ` → <answer>`; on `DEEP` also push it.
 
 Do not `Read` or `grep` a trace file. Do not start `run-deep`: the Opus read
 happens only when the user asks (`/analyze-task`, or "разбери №N"). `STALL`,
-`RUN ENDED`, `MODE` and totals lines are relayed as one line, no triage.
+`RUN ENDED`, `MODE` and totals lines get no triage.
 
 ## Flags
 

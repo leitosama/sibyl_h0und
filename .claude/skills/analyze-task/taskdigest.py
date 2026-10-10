@@ -14,6 +14,16 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from runview import (  # noqa: F401  (re-exported for the watcher and the CLI)
+    TRIAGE_LOG,
+    deep_candidates,
+    event_line,
+    run_totals,
+    short_count,
+    symbol,
+    totals_event_line,
+)
+
 from sibyl_h0und.catalog import FINISH_TOOL
 from sibyl_h0und.investigation import find_report
 from sibyl_h0und.replay import DEFAULT_WRONG_BELOW
@@ -21,7 +31,6 @@ from sibyl_h0und.replay import DEFAULT_WRONG_BELOW
 NOT_SHOWN = 160
 GRADED, PRACTICE = "graded", "practice"
 GRADED_AGENT = "h0und1"  # the competition token profile, `.env.h0und1` (ADR 0002)
-TRIAGE_LOG = "analysis.log"
 
 
 def mode_of_agent(agent_name: str) -> str:
@@ -315,6 +324,7 @@ def metrics(task: Task, end: dict[str, Any] | None) -> dict[str, Any]:
         "cited": len(task.cited),
         "knowledge": len(task.knowledge),
         "attempts": len(task.attempts),
+        "gates": [outcome for _, outcome, _ in task.attempts],
         "calls_after_first_finish": len(after),
         "verdicts": verdicts,
         "flip": len(set(verdicts)) > 1,
@@ -481,17 +491,6 @@ def append_triage(run_dir: Path, task: Task, text: str) -> str:
     with (run_dir / TRIAGE_LOG).open("a") as log:
         log.write(line + "\n")
     return line
-
-
-def deep_candidates(run_dir: Path) -> list[str]:
-    """Return the task numbers triaged DEEP and not yet superseded by a SKIP."""
-    path = run_dir / TRIAGE_LOG
-    state: dict[str, bool] = {}
-    for line in path.read_text().splitlines() if path.exists() else []:
-        parts = line.split()
-        if len(parts) >= 4 and parts[0].startswith("["):
-            state[parts[0].lstrip("[")] = parts[3].upper() == "DEEP"
-    return [number for number, deep in state.items() if deep]
 
 
 def build(path: Path, mode: str | None = None) -> tuple[Task, dict[str, Any] | None]:
