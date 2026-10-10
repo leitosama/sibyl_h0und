@@ -34,7 +34,8 @@ src/sibyl_h0und/
   cli.py                       точка входа h0und: настройки, run, печать итогов
   settings.py                  настройки из окружения / .env
   agent.py                     SimpleSGRAgent: цикл «одно действие за ход», SYSTEM_PROMPT
-  investigation.py             Investigation: before_call / after_call / after_review одной задачи (ADR 0016), промпты челленджера и репортёра
+  investigation.py             Investigation: alert_stage_call / before_call / after_call / after_review одной задачи (ADR 0016), промпты челленджера и репортёра
+  alert_stage.py               этап алерта: вызовы, которые до первого хода открывают сущности алерта и их связи (ADR 0027)
   digest.py                    дайджест улик из GraphLedger для побочных ходов (ADR 0022)
   outcome.py                   ToolOutcome: ответ runtime, разобранный один раз
   llm.py                       клиент OpenAI-совместимого API со structured output
@@ -54,7 +55,10 @@ tests/                         тесты без сети
 
 Цикл агента: на каждом шаге модель возвращает `NextStep` (состояние, план,
 один вызов инструмента) по строгой JSON-схеме, которую `ToolCatalog` строит
-из `available_tools` задачи. `Investigation.before_call` проверяет вызов по каталогу задачи и в
+из `available_tools` задачи. До первого хода цикл делает вызовы этапа алерта
+(`Investigation.alert_stage_call`): `get_entity` каждой сущности алерта и поиск
+по её id — одна страница, а если страниц больше, все страницы в окне алерта
+(ADR 0027); модель видит их как обычные улики. `Investigation.before_call` проверяет вызов по каталогу задачи и в
 GraphLedger, в runtime уходит только то, что нельзя ответить локально, а
 `after_call` собирает ответ для модели: `last_tool_result` вместе с
 `still_open`. Вызов `lookup_knowledge` отвечает локально из пакетов знаний.
@@ -81,6 +85,7 @@ GraphLedger, в runtime уходит только то, что нельзя от
 | В отчёт попадает только то, что относится к инциденту | [0013](adr/0013-minimal-report.md) |
 | Алерт считаем атакой, пока улики не докажут обратное; benign-вердикт перед отправкой один раз возвращается модели на проверку | [0020](adr/0020-alert-presumed-malicious.md) |
 | Первый benign оспаривает челленджер: отдельный вызов LLM на дайджесте улик, без рассуждений головы; при сбое — общий вопрос; модель — `LLM_CHALLENGER_MODEL` или общая | [0022](adr/0022-benign-challenger.md), [0025](adr/0025-challenger-model.md) |
+| До первого хода код открывает каждую сущность алерта и её связи: поиск по id, у занятой сущности — все страницы в окне алерта ±1 час | [0027](adr/0027-alert-stage-opens-alert-entities.md) |
 | Отчёт в runtime пишет репортёр на дайджесте улик при фиксированном вердикте головы; негодный отчёт — один ремонт, потом черновик | [0023](adr/0023-reporter.md) |
 
 ## Гипотезы

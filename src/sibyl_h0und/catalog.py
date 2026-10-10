@@ -134,6 +134,13 @@ class ToolCatalog:
                 return name
         return None
 
+    def schema(self, tool_name: str) -> dict[str, Any] | None:
+        """Return a tool's resolved argument schema, or `None` when its arguments are free.
+
+        The schema is the catalog's own copy: read it, do not change it.
+        """
+        return self._schemas.get(tool_name)
+
     def is_local(self, tool_name: str) -> bool:
         """Tell whether the agent answers a catalog tool itself."""
         return tool_name in self.local_names

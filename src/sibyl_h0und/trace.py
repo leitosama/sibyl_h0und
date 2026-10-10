@@ -179,13 +179,24 @@ class TaskTrace:
         self.event("report_written", fallback=fallback, payload=payload)
 
     def tool_call(
-        self, tool: str, arguments: dict[str, Any], response: dict[str, Any], duration_ms: int
+        self,
+        tool: str,
+        arguments: dict[str, Any],
+        response: dict[str, Any],
+        duration_ms: int,
+        *,
+        alert_stage: bool = False,
     ) -> None:
-        """Write one runtime call with the full decoded `ToolCallResult` response."""
+        """Write one runtime call with the full decoded `ToolCallResult` response.
+
+        `alert_stage` marks a call the harness made before the first turn
+        (ADR 0027); older traces lack the field.
+        """
         self.event(
             "tool_call",
             duration_ms=duration_ms,
             tool=tool,
+            alert_stage=alert_stage,
             status=response.get("info", {}).get("tool_status"),
             reward=response.get("reward"),
             terminated=response.get("terminated"),

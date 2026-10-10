@@ -102,14 +102,18 @@ class FakeStepClient:
 class FakeSession:
     """In-memory remote session used by the structured agent test."""
 
-    def __init__(self) -> None:
-        """Create a task with a JSON-encoded remote tool catalog."""
+    def __init__(self, entities: tuple[str, ...] = ("entity-1",)) -> None:
+        """Create a task with a JSON-encoded remote tool catalog.
+
+        Args:
+            entities: Ids of the entities the alert names.
+        """
         self.task = PublicTask(
             task_id="task-1",
             observation={
                 "last_tool_result": '""',
                 "available_tools": TOOL_CATALOG,
-                "alert_text": json.dumps({"trigger_entities": [{"id": "entity-1"}]}),
+                "alert_text": json.dumps({"trigger_entities": [{"id": item} for item in entities]}),
             },
         )
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -237,7 +241,7 @@ def read_events(path: Path) -> list[dict[str, Any]]:
 
 
 def test_agent_executes_fresh_structured_task_via_remote_session(tmp_path: Path) -> None:
-    """Tool evidence should feed the next step, and the task should leave a trace."""
+    """The alert stage's evidence reaches the first turn, a repeat is free, and all is traced."""
     llm = FakeStepClient(investigation_steps())
     session = FakeSession()
     agent = SimpleSGRAgent(llm, trace_dir=tmp_path, trace_metadata={"model": "m-1"})
@@ -251,17 +255,21 @@ def test_agent_executes_fresh_structured_task_via_remote_session(tmp_path: Path)
         "get_entity",
         "finish_investigation",
     ]
-    assert session.calls[0][1] == {
-        "entity_id": "entity-1",
-        "reasoning": "Inspect the alert entity.",
-    }
+    assert session.calls[0][1]["entity_id"] == "entity-1"
     assert session.calls[1][1] == {"submission": MALICIOUS_SUBMISSION}
-    tool_message = llm.requests[1][-1]
-    assert tool_message["role"] == "tool"
-    assert json.loads(tool_message["content"]) == {
+    # Before the first turn the model already sees the alert stage's call and its evidence.
+    stage_call, stage_answer = llm.requests[0][2:]
+    assert stage_call["tool_calls"][0]["function"]["name"] == "get_entity"
+    assert stage_answer["role"] == "tool"
+    assert stage_answer["tool_call_id"] == stage_call["tool_calls"][0]["id"]
+    assert json.loads(stage_answer["content"]) == {
         "status": "ok",
         "result": {"id": "entity-1", "pid": 42},
     }
+    # The model's own fetch of the same entity is answered from the ledger.
+    repeat = json.loads(llm.requests[1][-1]["content"])
+    assert repeat["result"] == {"id": "entity-1", "pid": 42}
+    assert "note" in repeat
     request_text = json.dumps(llm.requests[1])
     assert request_text.count("CATALOG-MARKER") == 1
     assert "entity-1" in str(llm.requests[0][1]["content"])
@@ -270,8 +278,9 @@ def test_agent_executes_fresh_structured_task_via_remote_session(tmp_path: Path)
     events = read_events(run_dir / "001_task-1.trace.jsonl")
     assert [event["kind"] for event in events] == [
         "task_start",
-        "step",
         "tool_call",
+        "step",
+        "tool_cached",
         "step",
         "report_written",
         "tool_call",
@@ -279,8 +288,12 @@ def test_agent_executes_fresh_structured_task_via_remote_session(tmp_path: Path)
     ]
     assert events[0]["payload"]["run"] == {"model": "m-1"}
     assert "available_tools" in events[0]["payload"]["task"]["observation"]
-    assert events[2]["tool"] == "get_entity"
-    assert json.loads(events[2]["payload"]["response"]["observation"]["last_tool_result"]) == {
+    assert events[1]["tool"] == "get_entity"
+    assert [event["alert_stage"] for event in events if event["kind"] == "tool_call"] == [
+        True,
+        False,
+    ]
+    assert json.loads(events[1]["payload"]["response"]["observation"]["last_tool_result"]) == {
         "id": "entity-1",
         "pid": 42,
     }
@@ -349,9 +362,10 @@ def test_ledger_answers_invented_ids_and_repeats_without_the_runtime(tmp_path: P
     (run_dir,) = tmp_path.iterdir()
     events = read_events(run_dir / "001_task-1.trace.jsonl")
     assert [event["kind"] for event in events if event["kind"].startswith("tool_")] == [
+        "tool_call",
         "tool_rejected",
         "tool_invalid",
-        "tool_call",
+        "tool_cached",
         "tool_cached",
         "tool_rejected",
         "tool_rejected",
@@ -370,7 +384,7 @@ def test_knowledge_lookup_is_answered_locally_and_costs_no_runtime_call(tmp_path
 
     asyncio.run(agent.run(cast(RemoteBenchmarkClient, FakeClient(session))))
 
-    assert [name for name, _ in session.calls] == ["finish_investigation"]
+    assert [name for name, _ in session.calls] == ["get_entity", "finish_investigation"]
     opening = json.loads(llm.requests[0][1]["content"])
     assert "lookup_knowledge" in [tool["name"] for tool in opening["available_tools"]]
     offered = llm.formats[0]["json_schema"]["schema"]["properties"]["function"]["anyOf"]
@@ -384,31 +398,27 @@ def test_knowledge_lookup_is_answered_locally_and_costs_no_runtime_call(tmp_path
 
 
 def test_agent_reserves_the_last_runtime_call_for_the_report(tmp_path: Path) -> None:
-    """At the ceiling the model is told to finish, and other tools no longer reach the runtime."""
-    llm = FakeStepClient(
-        [
-            get_entity_step("entity-invented"),
-            get_entity_step("entity-1"),
-            get_entity_step("entity-2"),
-            investigation_steps()[1],
-        ]
-    )
-    session = FakeSession()
+    """The alert stage stops at the ceiling, and then only the report reaches the runtime."""
+    llm = FakeStepClient([get_entity_step("entity-2"), investigation_steps()[1]])
+    session = FakeSession(entities=("entity-1", "entity-2"))
     agent = SimpleSGRAgent(llm, max_runtime_calls=2, trace_dir=tmp_path)
 
     result = asyncio.run(agent.run(cast(RemoteBenchmarkClient, FakeClient(session))))
 
     assert result.successful_tasks == 1
-    # The locally answered first turn did not use up the ceiling of two calls.
-    assert [name for name, _ in session.calls] == ["get_entity", "finish_investigation"]
-    notice = llm.requests[2][-1]
+    # The stage fetched one of the two alert entities and left the last call for the report.
+    assert [(name, arguments.get("entity_id")) for name, arguments in session.calls] == [
+        ("get_entity", "entity-1"),
+        ("finish_investigation", None),
+    ]
+    notice = llm.requests[0][-1]
     assert notice["role"] == "user"
     assert "Only finish_investigation remains" in notice["content"]
-    finish_only = llm.formats[2]["json_schema"]["schema"]["properties"]["function"]["anyOf"]
+    finish_only = llm.formats[0]["json_schema"]["schema"]["properties"]["function"]["anyOf"]
     assert [option["properties"]["tool"]["enum"] for option in finish_only] == [
         ["finish_investigation"]
     ]
-    assert "cannot be called now" in json.loads(llm.requests[3][-1]["content"])["message"]
+    assert "cannot be called now" in json.loads(llm.requests[1][-1]["content"])["message"]
     (run_dir,) = tmp_path.iterdir()
     kinds = [event["kind"] for event in read_events(run_dir / "001_task-1.trace.jsonl")]
     assert kinds.count("finish_only") == 1

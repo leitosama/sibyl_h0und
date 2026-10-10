@@ -19,6 +19,12 @@ from sibyl_h0und.outcome import ToolOutcome
 from sibyl_h0und.trace import TaskTrace, elapsed_ms, run_trace_dir, task_trace_path
 from sibyl_h0und.vocabulary import KNOWLEDGE_TOOL
 
+# The content of each alert-stage call in the model's history: the harness
+# made it, not the model (ADR 0027).
+ALERT_STAGE_NOTE = (
+    "Before the first turn, the harness opened the alert's entities and their relations. "
+    "This call is made; build on its result."
+)
 SYSTEM_PROMPT = f"""
 You are a senior SOC analyst investigating one security alert in an evidence graph.
 Your answer is a verdict (malicious or benign) and a report that names the entities
@@ -155,6 +161,37 @@ Mechanics:
 - When told that only `{FINISH_TOOL}` remains, submit the verdict at once from the
   evidence already gathered.
 """.strip()
+
+
+def assistant_call(
+    tool_call_id: str, content: str, tool: str, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    """Build the history message of one tool call."""
+    return {
+        "role": "assistant",
+        "content": content,
+        "tool_calls": [
+            {
+                "type": "function",
+                "id": tool_call_id,
+                "function": {"name": tool, "arguments": render_json(arguments)},
+            }
+        ],
+    }
+
+
+def tool_message(tool_call_id: str, feedback: dict[str, Any]) -> dict[str, Any]:
+    """Build the history message that answers one tool call."""
+    return {"role": "tool", "content": render_json(feedback), "tool_call_id": tool_call_id}
+
+
+def decode(response: ToolCallResult) -> ToolOutcome:
+    """Decode a runtime response once, as replay decodes a recorded one."""
+    return ToolOutcome.from_wire(
+        info=response.info,
+        observation=response.observation,
+        terminal=response.task_result is not None,
+    )
 
 
 async def run_review(
@@ -337,6 +374,28 @@ class SimpleSGRAgent:
             investigation.opening_message(),
         ]
 
+        # The alert stage (ADR 0027): the alert's entities and their relations,
+        # opened before the first turn and shown as ordinary evidence.
+        stage_calls = 0
+        while budget.leaves_room() and (call := investigation.alert_stage_call()) is not None:
+            stage_calls += 1
+            tool_call_id = f"alert_stage_{stage_calls}"
+            messages.append(
+                assistant_call(tool_call_id, ALERT_STAGE_NOTE, call.tool, call.arguments)
+            )
+            budget.record_runtime_call()
+            response = await self._call_tool(
+                session, trace, call.tool, call.arguments, alert_stage=True
+            )
+            if response.task_result is not None:
+                return TaskResult.model_validate(response.task_result)
+            feedback = investigation.after_call(
+                call.tool, call.arguments, decode(response)
+            ).feedback
+            messages.append(tool_message(tool_call_id, feedback))
+        if stage_calls:
+            logger.info("The alert stage made {} runtime calls.", stage_calls)
+
         while True:
             step_number = trace.next_step()
             finish_only = budget.start_turn()
@@ -363,20 +422,12 @@ class SimpleSGRAgent:
             trace.step_chosen(tool_name, step.model_dump(mode="json"))
             tool_call_id = f"step_{step_number}"
             messages.append(
-                {
-                    "role": "assistant",
-                    "content": step.plan_remaining_steps_brief[0],
-                    "tool_calls": [
-                        {
-                            "type": "function",
-                            "id": tool_call_id,
-                            "function": {
-                                "name": tool_name,
-                                "arguments": render_json(step.function.arguments),
-                            },
-                        }
-                    ],
-                }
+                assistant_call(
+                    tool_call_id,
+                    step.plan_remaining_steps_brief[0],
+                    tool_name,
+                    step.function.arguments,
+                )
             )
 
             decision = investigation.before_call(
@@ -392,23 +443,13 @@ class SimpleSGRAgent:
             else:
                 budget.record_runtime_call()
                 response = await self._call_tool(session, trace, tool_name, decision.arguments)
-                outcome = ToolOutcome.from_wire(
-                    info=response.info,
-                    observation=response.observation,
-                    terminal=response.task_result is not None,
-                )
+                outcome = decode(response)
                 logger.info("Tool {} returned status {}.", tool_name, outcome.status)
                 if response.task_result is not None:
                     return TaskResult.model_validate(response.task_result)
                 feedback = investigation.after_call(tool_name, decision.arguments, outcome).feedback
 
-            messages.append(
-                {
-                    "role": "tool",
-                    "content": render_json(feedback),
-                    "tool_call_id": tool_call_id,
-                }
-            )
+            messages.append(tool_message(tool_call_id, feedback))
 
     @staticmethod
     async def _call_tool(
@@ -416,6 +457,8 @@ class SimpleSGRAgent:
         trace: TaskTrace,
         tool_name: str,
         arguments: dict[str, Any],
+        *,
+        alert_stage: bool = False,
     ) -> ToolCallResult:
         """Invoke one runtime tool and trace the exact request and full response.
 
@@ -424,6 +467,7 @@ class SimpleSGRAgent:
             trace: Task trace of this session.
             tool_name: Advertised tool name.
             arguments: Tool arguments sent to the runtime.
+            alert_stage: Whether the alert stage made the call, not the model.
 
         Returns:
             Server tool-call response.
@@ -432,6 +476,10 @@ class SimpleSGRAgent:
         started_at = time.perf_counter()
         response = await session.call_tool(tool_name, arguments)
         trace.tool_call(
-            tool_name, arguments, response.model_dump(mode="json"), elapsed_ms(started_at)
+            tool_name,
+            arguments,
+            response.model_dump(mode="json"),
+            elapsed_ms(started_at),
+            alert_stage=alert_stage,
         )
         return response

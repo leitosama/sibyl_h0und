@@ -1,7 +1,9 @@
-"""Everything one task knows about its investigation, behind three operations.
+"""Everything one task knows about its investigation, behind a few operations.
 
-The agent loop asks `before_call` what to do with the model's call and gives
-the runtime's answer to `after_call`. When the call needs a side turn of the
+Before the model's first turn, the agent loop makes the calls `alert_stage_call`
+returns: the alert stage opens the alert's entities and their relations
+(ADR 0027). Then the loop asks `before_call` what to do with the model's call
+and gives the runtime's answer to `after_call`. When the call needs a side turn of the
 LLM first (the benign challenger, ADR 0022), the loop runs it and gives its
 reply to `after_review`. The tool catalog, GraphLedger, the `still_open`
 merge, the local knowledge lookup, the side turns' requests, the wording of
@@ -14,6 +16,7 @@ from typing import Any
 from loguru import logger
 from pydantic import BaseModel
 
+from sibyl_h0und.alert_stage import AlertStage, StageCall
 from sibyl_h0und.catalog import FINISH_TOOL, ToolCatalog
 from sibyl_h0und.digest import evidence_digest
 from sibyl_h0und.ledger import GraphLedger, listing
@@ -255,6 +258,10 @@ class Investigation:
         self.report_fallback: str | None = None
         # A search scoped to a relation type lists an entity's relations by its id.
         self._relation_search = self.catalog.relation_search()
+        self._stage = AlertStage(self.catalog, self.alert, self._ledger)
+        # The alert stage's call in flight and the runtime's answer to it.
+        self._stage_call: StageCall | None = None
+        self._stage_outcome: ToolOutcome | None = None
 
     def opening_message(self) -> dict[str, Any]:
         """Return the first user message: the alert and the tool catalog, once."""
@@ -268,6 +275,20 @@ class Investigation:
                 }
             ),
         }
+
+    def alert_stage_call(self) -> StageCall | None:
+        """Return the alert stage's next call, made before the model's first turn.
+
+        The stage fetches each alert entity and lists its relations by a
+        search on its id (ADR 0027). Give the runtime's answer to each call
+        to `after_call`, like any other, before asking for the next.
+
+        Returns:
+            The next call to send, or `None` when the stage is over.
+        """
+        self._stage_call = self._stage.next_call(self._stage_outcome)
+        self._stage_outcome = None
+        return self._stage_call
 
     def before_call(
         self,
@@ -667,6 +688,8 @@ class Investigation:
             The tool message content.
         """
         self._ledger.record(tool, arguments, outcome)
+        if self._stage_call == StageCall(tool, arguments):
+            self._stage_outcome = outcome
         feedback = outcome.evidence()
         if tool == FINISH_TOOL and self._rewritten:
             # The model's history shows its own draft; the answer is about this report.
