@@ -22,7 +22,14 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "analyze-task"))
 
-from taskdigest import Task, flags, scores_hidden  # noqa: E402
+from taskdigest import (  # noqa: E402
+    Task,
+    flags,
+    metrics,
+    percentile,
+    scores_hidden,
+    structure_flags,
+)
 
 from sibyl_h0und.replay import DEFAULT_TRACES, DEFAULT_WRONG_BELOW  # noqa: E402
 
@@ -30,6 +37,8 @@ STALL_SECONDS = 300
 TOTALS_EVERY = 5
 POLL_SECONDS = 2
 LOG_NAME = "monitor.log"
+JSONL_NAME = "monitor.jsonl"
+MIN_HISTORY = 5  # finished tasks before a p90 flag means anything
 
 
 def wait_for_new_run(root: Path, started: float) -> Path:
@@ -112,6 +121,18 @@ def totals_line(rows: list[dict[str, float | None]], last: int) -> str:
     )
 
 
+def relative_flags(m: dict[str, Any], earlier: list[dict[str, Any]]) -> list[str]:
+    """Flag a task whose time or tokens exceed the p90 of the tasks before it."""
+    if len(earlier) < MIN_HISTORY:
+        return []
+    found = []
+    for flag, key in (("slow", "duration_s"), ("heavy", "tokens")):
+        limit = percentile([e[key] for e in earlier])
+        if limit is not None and m[key] > limit:
+            found.append(flag)
+    return found
+
+
 def agent_running() -> bool:
     """Tell whether an `h0und` process runs; assume it does when pgrep is missing."""
     if shutil.which("pgrep") is None:
@@ -150,6 +171,7 @@ def main() -> None:
     offsets: dict[Path, int] = {}
     tasks: dict[Path, Task] = {}
     rows: list[dict[str, float | None]] = []
+    history: list[dict[str, Any]] = []
     log_path = run_dir / LOG_NAME
     logged = {
         line.split("]")[0] + "]"
@@ -174,15 +196,29 @@ def main() -> None:
                     continue
                 text, row = task_line(task, end)
                 rows.append(row)
+                m = metrics(task, end)
+                earlier, history = history, [*history, m]
                 key = f"[{task.number:03d} {task.id}]"
                 if number <= seen or key in logged:
                     continue
-                found = flags(task, end)
+                found = flags(task, end) + structure_flags(m) + relative_flags(m, earlier)
                 block = f"{text}\nflags={','.join(found) or '-'}"
                 if found:
                     block += f"\n{why_lines(task)}"
                 with log_path.open("a") as log:
                     log.write(block + "\n")
+                record = {
+                    "number": task.number,
+                    "id": task.id,
+                    "verdict": task.verdict,
+                    "flags": found,
+                    "model": task.model,
+                    "label": task.label,
+                    "scores_hidden": scores_hidden(end),
+                    **m,
+                }
+                with (run_dir / JSONL_NAME).open("a") as jsonl:
+                    jsonl.write(json.dumps(record, ensure_ascii=False) + "\n")
                 if found or verbose:
                     print(block, flush=True)
                 if len(rows) % TOTALS_EVERY == 0:

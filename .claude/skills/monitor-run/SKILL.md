@@ -38,6 +38,15 @@ A task is printed when it has at least one flag:
 | `tool_errors`, `llm_errors` | failed runtime or LLM calls |
 | `not_terminated` | the task ended by anything but `terminated`, or with an error |
 | `low_q` | `Q` below `--wrong-below` (only when scores are visible) |
+| `rework` | 5 or more calls after the first try to finish: the gates sent the agent back |
+| `repeat` | 3 or more repeated lookups (`tool_cached` plus identical arguments) |
+| `near_ceiling` | 90% or more of the runtime call ceiling spent |
+| `slow`, `heavy` | duration or tokens above the p90 of earlier tasks of the run (after 5 tasks) |
+
+The last four count trace events only. They do not look at what an entity or
+a knowledge entry says (ADR 0017). Every task also lands in `monitor.jsonl`
+(metrics, flags, model, label); `digest_task.py RUN --summary` tables it and
+`digest_task.py RUN_A --compare RUN_B` puts two runs side by side.
 
 ## Report
 

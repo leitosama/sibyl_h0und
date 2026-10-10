@@ -8,6 +8,7 @@ errors. Nothing here is used by the agent; it is offline trace analysis only.
 
 import contextlib
 import json
+import math
 from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
@@ -102,6 +103,26 @@ class Task:
         self.refusals: list[str] = []
         self.last_state = ""
         self.finish_seq: int | None = None
+        self.label = ""
+        self.ceiling: int | None = None
+        self.roles: dict[str, list[int]] = {}  # role -> [calls, tokens, ms]
+        self.head_tokens: list[int] = []
+        self.llm_slow: list[tuple[int, int, str]] = []  # (ms, seq, role)
+        self.tool_slow: list[tuple[int, int, str]] = []  # (ms, seq, tool)
+        self.tool_ms = 0
+        self.calls: list[tuple[int, str, str]] = []  # (seq, tool, arguments key)
+        self.cached: Counter = Counter()
+        self.knowledge: list[str] = []
+        self.opened: set[str] = set()
+        self.cited: set[str] = set()
+        self.pages = 0
+        self.attempts: list[tuple[int, str, str | None]] = []  # (seq, outcome, verdict)
+
+    def _attempt(self, event: dict[str, Any], outcome: str) -> None:
+        """Record one try to finish: its outcome and the verdict it carried."""
+        arguments = (event.get("payload") or {}).get("arguments") or {}
+        verdict = (find_report(arguments) or {}).get("verdict")
+        self.attempts.append((event.get("seq") or 0, outcome, verdict))
 
     def feed(self, event: dict[str, Any]) -> dict[str, Any] | None:
         """Take one event; return it when it ends the task."""
@@ -109,18 +130,49 @@ class Task:
         if kind == "task_start":
             task = payload.get("task") or {}
             self.alert = alert_summary(task.get("observation") or {})
-            self.model = (payload.get("run") or {}).get("model") or ""
+            run = payload.get("run") or {}
+            self.model = run.get("model") or ""
+            self.label = run.get("run_label") or ""
+            self.ceiling = run.get("agent_max_runtime_calls")
+        elif kind == "llm_call":
+            role = event.get("role") or "?"
+            tokens, ms = event.get("tokens") or 0, event.get("duration_ms") or 0
+            row = self.roles.setdefault(role, [0, 0, 0])
+            row[0], row[1], row[2] = row[0] + 1, row[1] + tokens, row[2] + ms
+            self.llm_slow.append((ms, event.get("seq") or 0, role))
+            if role == "head":
+                self.head_tokens.append(tokens)
+        elif kind == "tool_cached":
+            self.cached[event.get("tool")] += 1
+        elif kind == "tool_knowledge":
+            query = (payload.get("arguments") or {}).get("query")
+            self.knowledge.append(clip(query, 100))
         elif kind == "step":
             state = (payload.get("step") or {}).get("current_state")
             if state:
                 self.last_state = clip(state, 400)
         elif kind == "tool_call":
-            self.tools[event.get("tool")] += 1
-            if event.get("tool") == FINISH_TOOL:
-                report = find_report(payload.get("arguments") or {}) or {}
+            tool, arguments = event.get("tool"), payload.get("arguments") or {}
+            self.tools[tool] += 1
+            ms = event.get("duration_ms") or 0
+            self.tool_ms += ms
+            self.tool_slow.append((ms, event.get("seq") or 0, str(tool)))
+            same = json.dumps(
+                {k: v for k, v in arguments.items() if k != "reasoning"}, sort_keys=True
+            )
+            self.calls.append((event.get("seq") or 0, str(tool), same))
+            for key in ("entity_id", "relation_id"):
+                if isinstance(arguments.get(key), str):
+                    self.opened.add(arguments[key])
+            if tool == "search" and (arguments.get("page_id") or 1) > 1:
+                self.pages += 1
+            if tool == FINISH_TOOL:
+                report = find_report(arguments) or {}
                 self.verdict = report.get("verdict", self.verdict)
                 self.report_ids = sum(citations(report).values())
+                self.cited = {key for key, _, _ in citations(report)}
                 self.finish_seq = event.get("seq")
+                self._attempt(event, "sent")
             if event.get("status") != "ok":
                 self.tool_errors += 1
                 self.errors.append(
@@ -131,14 +183,20 @@ class Task:
             self.llm_errors += 1
         elif kind == "tool_rejected":
             self.rejected += 1
+            self._attempt(event, "rejected")
         elif kind == "report_refused":
             self.refused += 1
+            self._attempt(event, "report_refused")
+        elif kind == "citations_refused":
+            self._attempt(event, "citations_refused")
         elif kind == "answers_refused":
+            self._attempt(event, "answers_refused")
             for item in event.get("review") or []:
                 why = clip(item.get("why"), 140)
                 self.refusals.append(f"{item.get('n')}:{item.get('outcome')} {why}")
         elif kind == "benign_challenged":
             self.challenged += 1
+            self._attempt(event, "challenged")
             challenge = (payload.get("feedback") or {}).get("challenge") or {}
             self.hypotheses.append(clip(challenge.get("hypothesis", ""), 260))
             for check in challenge.get("checks") or []:
@@ -183,6 +241,131 @@ def flags(task: Task, end: dict[str, Any]) -> list[str]:
     return found
 
 
+REWORK_CALLS = 5
+REPEAT_CALLS = 3
+CEILING_SHARE = 0.9
+BIG_CONTEXT = 50_000
+
+
+def metrics(task: Task, end: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the structural numbers of a task: cost, repeats, rework and coverage.
+
+    They come from the trace alone, so they stay available when the runtime
+    hides the scores.
+    """
+    end = end or {}
+    calls = end.get("runtime_calls") or len(task.calls)
+    first_finish = min((seq for seq, _, _ in task.attempts), default=None)
+    after = [c for c in task.calls if first_finish is not None and c[0] > first_finish]
+    after = [c for c in after if c[1] != FINISH_TOOL]
+    same = Counter(key for _, tool, key in task.calls if tool != FINISH_TOOL)
+    streak, best, previous = 0, ("", 0), None
+    for _, tool, _ in task.calls:
+        streak = streak + 1 if tool == previous else 1
+        previous = tool
+        if streak > best[1]:
+            best = (tool, streak)
+    verdicts = [v for _, _, v in task.attempts if v]
+    head = task.head_tokens
+    big = next((i + 1 for i, t in enumerate(head) if t >= BIG_CONTEXT), None)
+    return {
+        "calls": calls,
+        "ceiling": task.ceiling,
+        "ceiling_share": calls / task.ceiling if task.ceiling else None,
+        "tokens": end.get("llm_tokens") or sum(r[1] for r in task.roles.values()),
+        "tokens_by_role": {k: v[1] for k, v in task.roles.items()},
+        "ms_by_role": {k: v[2] for k, v in task.roles.items()},
+        "llm_ms": sum(r[2] for r in task.roles.values()),
+        "tool_ms": task.tool_ms,
+        "duration_s": (end.get("duration_ms") or 0) / 1000,
+        "head_first": head[0] if head else 0,
+        "head_last": head[-1] if head else 0,
+        "head_big_at_call": big,
+        "tools": dict(task.tools),
+        "cached": sum(task.cached.values()),
+        "cached_by_tool": dict(task.cached),
+        "same_args": sum(n - 1 for n in same.values() if n > 1),
+        "streak_tool": best[0],
+        "streak": best[1],
+        "pages": task.pages,
+        "opened": len(task.opened),
+        "cited": len(task.cited),
+        "knowledge": len(task.knowledge),
+        "attempts": len(task.attempts),
+        "calls_after_first_finish": len(after),
+        "verdicts": verdicts,
+        "flip": len(set(verdicts)) > 1,
+    }
+
+
+def structure_flags(m: dict[str, Any]) -> list[str]:
+    """Flag structural waste; only counts of trace events, never knowledge content."""
+    found = []
+    if m["calls_after_first_finish"] >= REWORK_CALLS:
+        found.append("rework")
+    if m["cached"] + m["same_args"] >= REPEAT_CALLS:
+        found.append("repeat")
+    if (m["ceiling_share"] or 0) >= CEILING_SHARE:
+        found.append("near_ceiling")
+    return found
+
+
+def percentile(values: list[float], share: float = 0.9) -> float | None:
+    """Return the `share` quantile of `values` (nearest rank), None when empty."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(share * len(ordered)) - 1)]
+
+
+def economy_lines(task: Task, m: dict[str, Any]) -> list[str]:
+    """Return the cost and waste section of the digest."""
+    total_tokens = sum(m["tokens_by_role"].values()) or 1
+    total_ms = (m["llm_ms"] + m["tool_ms"]) or 1
+    by_role = m["tokens_by_role"]
+    roles = ", ".join(
+        f"{role} {by_role[role] / 1000:.0f}k ({by_role[role] * 100 // total_tokens}%)"
+        f"/{m['ms_by_role'][role] / 1000:.0f}s"
+        for role in sorted(by_role, key=lambda r: -by_role[r])
+    )
+    lines = [f"tokens by role: {roles}"]
+    big = m["head_big_at_call"]
+    lines.append(
+        f"head context: {m['head_first'] / 1000:.0f}k -> {m['head_last'] / 1000:.0f}k tokens/call"
+        + (f", over {BIG_CONTEXT // 1000}k from head call {big}" if big else "")
+    )
+    lines.append(
+        f"time: llm {m['llm_ms'] / 1000:.0f}s ({m['llm_ms'] * 100 // total_ms}%), "
+        f"runtime {m['tool_ms'] / 1000:.0f}s"
+    )
+    if m["ceiling"]:
+        share = m["calls"] * 100 // m["ceiling"]
+        lines.append(f"ceiling: {m['calls']}/{m['ceiling']} runtime calls ({share}%)")
+    slow_llm = ", ".join(
+        f"seq {s} {r} {ms / 1000:.1f}s" for ms, s, r in sorted(task.llm_slow)[-3:][::-1]
+    )
+    slow_tool = ", ".join(
+        f"seq {s} {t} {ms / 1000:.1f}s" for ms, s, t in sorted(task.tool_slow)[-3:][::-1]
+    )
+    lines.append(f"slowest llm: {slow_llm}")
+    lines.append(f"slowest runtime: {slow_tool}")
+    lines.append(
+        f"repeats: cached={m['cached']} {m['cached_by_tool'] or ''} same_args={m['same_args']} "
+        f"longest_streak={m['streak_tool']} x{m['streak']} search_pages>1={m['pages']}"
+    )
+    lines.append(
+        f"coverage: opened={m['opened']} cited={m['cited']} lookups={m['knowledge']}"
+        + (f" ({'; '.join(task.knowledge[:3])})" if task.knowledge else "")
+    )
+    if task.attempts:
+        chain = " -> ".join(f"{o}@{s}" + (f"[{v}]" if v else "") for s, o, v in task.attempts)
+        lines.append(
+            f"finish attempts: {chain}; calls after the first: {m['calls_after_first_finish']}"
+            + ("; verdict flipped" if m["flip"] else "")
+        )
+    return lines
+
+
 def render(task: Task, end: dict[str, Any] | None) -> str:
     """Return the multi-line digest of a task for a reviewer."""
     lines = [f"[{task.number:03d} {task.id}] model={task.model} verdict={task.verdict}"]
@@ -192,7 +375,7 @@ def render(task: Task, end: dict[str, Any] | None) -> str:
             f"end={end.get('completion_reason')} error={end.get('error')} "
             f"calls={end.get('runtime_calls')} llm={end.get('llm_calls')} "
             f"tokens={end.get('llm_tokens')} duration_s={(end.get('duration_ms') or 0) / 1000:.0f} "
-            f"flags={','.join(flags(task, end)) or '-'}"
+            f"flags={','.join(flags(task, end) + structure_flags(metrics(task, end))) or '-'}"
         )
         if scores_hidden(end):
             lines.append("scores: hidden by the runtime")
@@ -200,6 +383,7 @@ def render(task: Task, end: dict[str, Any] | None) -> str:
             q, e = end.get("quality_score") or 0.0, end.get("efficiency_score") or 0.0
             lines.append(f"scores: Q={q:.2f} E={e:.2f} reward={end.get('total_reward')}")
     lines.append(f"tools: {dict(task.tools.most_common())}")
+    lines.extend(economy_lines(task, metrics(task, end)))
     lines.append(
         f"report: cited={task.report_ids} reporter={task.reporter} fallback={task.fallback} "
         f"finish_seq={task.finish_seq}"
@@ -216,6 +400,44 @@ def render(task: Task, end: dict[str, Any] | None) -> str:
     if task.last_state:
         lines.append(f"last current_state: {task.last_state}")
     return "\n".join(lines)
+
+
+def load_rows(run_dir: Path) -> list[dict[str, Any]]:
+    """Read the per-task rows the watcher wrote to `monitor.jsonl`."""
+    path = run_dir / "monitor.jsonl"
+    if not path.exists():
+        raise SystemExit(f"{path} is missing: run watch_run.py on this run first")
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def summarize(rows: list[dict[str, Any]]) -> dict[str, str]:
+    """Return the run-level table as label -> text, from the watcher's rows."""
+
+    def stat(key: str, scale: float = 1.0) -> str:
+        values = [r[key] / scale for r in rows if r.get(key) is not None]
+        if not values:
+            return "n/a"
+        return f"{sum(values) / len(values):.1f} (p90 {percentile(values):.1f})"
+
+    flag_count = Counter(f for r in rows for f in r["flags"])
+    verdicts = Counter(r["verdict"] for r in rows)
+    first = rows[0] if rows else {}
+    repeats = sum(r["cached"] + r["same_args"] for r in rows) / max(len(rows), 1)
+    return {
+        "run": f"{first.get('label')} / {first.get('model')}",
+        "tasks": str(len(rows)),
+        "verdicts": ", ".join(f"{k} {v}" for k, v in verdicts.most_common()),
+        "calls": stat("calls"),
+        "ktokens": stat("tokens", 1000),
+        "head ctx last, k": stat("head_last", 1000),
+        "duration, s": stat("duration_s"),
+        "repeats/task": f"{repeats:.1f}",
+        "calls after 1st finish": stat("calls_after_first_finish"),
+        "opened": stat("opened"),
+        "cited": stat("cited"),
+        "verdict flips": str(sum(bool(r["flip"]) for r in rows)),
+        "flags": ", ".join(f"{k} {v}" for k, v in flag_count.most_common()) or "-",
+    }
 
 
 def build(path: Path) -> tuple[Task, dict[str, Any] | None]:
