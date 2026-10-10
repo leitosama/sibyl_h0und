@@ -15,7 +15,7 @@ from bluesec1_client import (
     RunCapacityExceededError,
 )
 from sibyl_h0und.agent import SimpleSGRAgent
-from sibyl_h0und.investigation import CHALLENGER_ROLE
+from sibyl_h0und.investigation import CHALLENGER_ROLE, JUDGE_ROLE
 from sibyl_h0und.llm import OpenAIStructuredStepClient
 from sibyl_h0und.settings import Settings
 
@@ -77,6 +77,8 @@ async def run(args: argparse.Namespace) -> None:
         result = await SimpleSGRAgent(
             llm,
             max_runtime_calls=settings.agent_max_runtime_calls,
+            challenger_ruling=settings.agent_challenger_ruling,
+            alert_stage=settings.agent_alert_stage,
             trace_dir=settings.trace_dir.expanduser() if settings.trace_enabled else None,
             trace_metadata={
                 "agent_name": agent_name,
@@ -88,6 +90,8 @@ async def run(args: argparse.Namespace) -> None:
                 "llm_max_completion_tokens": settings.llm_max_completion_tokens,
                 "llm_max_step_retries": settings.llm_max_step_retries,
                 "agent_max_runtime_calls": settings.agent_max_runtime_calls,
+                "agent_challenger_ruling": settings.agent_challenger_ruling,
+                "agent_alert_stage": settings.agent_alert_stage,
             },
         ).run(client)
 
@@ -143,10 +147,17 @@ def llm_client(settings: Settings) -> OpenAIStructuredStepClient:
 
 
 def role_models(settings: Settings) -> dict[str, str]:
-    """Return the models the settings give side turns instead of the default one."""
+    """Return the models the settings give side turns instead of the default one.
+
+    The challenger's ruling continues its own conversation, so it uses the
+    challenger's model (ADR 0025, 0028).
+    """
     if settings.llm_challenger_model is None:
         return {}
-    return {CHALLENGER_ROLE: settings.llm_challenger_model}
+    return {
+        CHALLENGER_ROLE: settings.llm_challenger_model,
+        JUDGE_ROLE: settings.llm_challenger_model,
+    }
 
 
 def load_settings() -> Settings:

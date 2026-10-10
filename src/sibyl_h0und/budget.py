@@ -56,6 +56,11 @@ class CallBudget:
         """Whether the model may call only `finish_investigation`."""
         return self.finish_reason is not None
 
+    @property
+    def at_ceiling(self) -> bool:
+        """Whether only the call reserved for the report is left below the ceiling."""
+        return self.runtime_calls >= self.max_runtime_calls - 1
+
     def start_turn(self) -> bool:
         """Account for one model turn and decide which tools it may call.
 
@@ -68,7 +73,7 @@ class CallBudget:
                 the runtime's own limit is used up.
         """
         if self.finish_reason is None:
-            if self.runtime_calls >= self.max_runtime_calls - 1:
+            if self.at_ceiling:
                 self.finish_reason = (
                     f"{self.runtime_calls} runtime calls made, the safety limit is "
                     f"{self.max_runtime_calls}"
@@ -87,6 +92,10 @@ class CallBudget:
                 f"and {self.finish_turns - 1} finish-only turns ({self.finish_reason})."
             )
         return True
+
+    def leaves_room(self) -> bool:
+        """Tell whether one more investigation call still leaves room for the report."""
+        return self.finish_reason is None and not self.at_ceiling
 
     def record_runtime_call(self) -> None:
         """Count a call that reached the runtime."""

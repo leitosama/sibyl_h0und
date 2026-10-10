@@ -1,12 +1,15 @@
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from sibyl_h0und.agent import SYSTEM_PROMPT
 from sibyl_h0und.catalog import FINISH_TOOL
 from sibyl_h0und.investigation import Investigation, LocalAnswer, Review, Send
-from sibyl_h0und.models import Challenge, ToolCall
+from sibyl_h0und.knowledge import load_pack
+from sibyl_h0und.models import Challenge, Ruling, ToolCall
 from sibyl_h0und.outcome import ToolOutcome
 from sibyl_h0und.trace import TaskTrace
 
@@ -257,11 +260,28 @@ def test_the_first_benign_report_goes_to_the_challenger_without_the_heads_reason
     assert FINISH_TOOL not in schema
 
 
-def test_the_challengers_usable_checks_reach_the_model_and_the_next_report_is_sent() -> None:
+def test_the_head_and_the_challenger_ask_the_tactic_checks_of_the_attack_pack() -> None:
+    """Both sides of a benign verdict get one check per ATT&CK tactic from initial access to
+    impact, named as the ATT&CK pack names them, so a pack update that renames a tactic shows."""
+    review = fetched_file_investigation().before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
+    assert isinstance(review, Review)
+    tactics = {
+        tactic
+        for entry in load_pack("attack_techniques").entries.values()
+        for tactic in entry["tactics"]
+    } - {"reconnaissance", "resource-development"}
+    bullet = re.compile(r"^\s*- ([a-z]+(?:-[a-z]+)*): ", re.MULTILINE)
+
+    for prompt in (SYSTEM_PROMPT, review.messages[0]["content"]):
+        assert sorted(bullet.findall(prompt)) == sorted(tactics)
+
+
+def test_the_challengers_usable_checks_reach_the_model_and_the_next_report_is_ruled() -> None:
     """Checks with an invented id or a repeated call go back to the challenger once, with
     the reason for each; then a check with an invented id is dropped, a repeated call is
     marked as made, a seen fact shows the values of the fields the evidence holds, the
-    checks are numbered, and the model's next report goes to the runtime as is."""
+    checks are numbered, and the model's next report goes back to the challenger for a
+    ruling."""
     investigation = fetched_file_investigation()
     review = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
     assert isinstance(review, Review)
@@ -304,7 +324,8 @@ def test_the_challengers_usable_checks_reach_the_model_and_the_next_report_is_se
             },
         ],
     }
-    assert to_reporter(again) == {"submission": BENIGN_REPORT}
+    assert isinstance(again, Review)
+    assert (again.role, again.arguments) == ("judge", {"submission": BENIGN_REPORT})
 
 
 @pytest.mark.parametrize(
@@ -369,31 +390,164 @@ REWRITTEN_REPORT = {
 }
 
 
-def test_the_reporters_report_is_sent_and_it_sees_the_draft_evidence_and_challenge(
+OTHER_FILE = {"id": "file-2", "type": "windows_file", "properties": {"path": "C:\\x.ps1"}}
+
+
+def ruling(verdict: str, *observed: dict[str, Any], result: str = "confirms") -> Ruling:
+    """A ruling on the one check of a challenge, citing these observed facts."""
+    return Ruling.model_validate(
+        {
+            "checks": [
+                {
+                    "n": 1,
+                    "observed": [fact["seen"] for fact in observed],
+                    "result": result,
+                    "why": "A remote shell wrote it.",
+                }
+            ],
+            "verdict": verdict,
+            "reasoning": "The script was written by a remote shell.",
+        }
+    )
+
+
+def to_ruling(path: Path | None = None) -> tuple[Investigation, Review, Review]:
+    """Challenge a benign report with one check, fetch the alert's other file, report again.
+
+    Returns:
+        The investigation, the challenger turn and the ruling turn it asks for.
+    """
+    investigation = Investigation(
+        observation(entities=("file-1", "file-2")), TaskTrace(path, task_id="t")
+    )
+    sent = investigation.before_call("get_entity", get_entity())
+    assert isinstance(sent, Send)
+    investigation.after_call("get_entity", sent.arguments, ToolOutcome("ok", DROPPED_FILE))
+    challenger = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
+    assert isinstance(challenger, Review)
+    investigation.after_review(challenger, challenge(seen("file-1", "path")))
+    sent = investigation.before_call("get_entity", get_entity("file-2"))
+    assert isinstance(sent, Send)
+    investigation.after_call("get_entity", sent.arguments, ToolOutcome("ok", OTHER_FILE))
+    judge = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
+    assert isinstance(judge, Review)
+    assert judge.role == "judge"
+    return investigation, challenger, judge
+
+
+def test_the_ruling_continues_the_challenge_and_the_report_is_written_for_its_verdict(
     tmp_path: Path,
 ) -> None:
-    """After a challenge, the next report goes to the reporter with the challenger's case;
-    the reporter's checked report is what reaches the runtime."""
+    """The challenger rules in its own conversation, seeing only what is new since its case
+    and never the head's reasoning; the reporter writes the report for the ruled verdict,
+    even against the head's draft, and the trace says the verdict flipped."""
     path = tmp_path / "t.trace.jsonl"
-    investigation = fetched_file_investigation(path)
-    review = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
-    assert isinstance(review, Review)
-    investigation.after_review(review, challenge(seen("file-1", "path")))
+    investigation, challenger, judge = to_ruling(path)
 
-    reporter = investigation.before_call(
-        FINISH_TOOL, {"submission": REPORT}, state="1: written by a remote shell -> confirms."
-    )
+    case = json.loads(judge.messages[2]["content"])
+    request = json.loads(judge.messages[-1]["content"])
+    reporter = investigation.after_review(judge, ruling("malicious", seen("file-1", "path")))
     assert isinstance(reporter, Review)
-    request = json.loads(reporter.messages[-1]["content"])
+    report = json.loads(reporter.messages[-1]["content"])
     sent = investigation.after_review(reporter, report_call(REWRITTEN_REPORT))
 
-    assert request["draft_report"] == {"submission": REPORT}
-    assert request["challenge"]["hypothesis"].startswith("The script in System32")
-    assert request["challenge"]["answers"] == "1: written by a remote shell -> confirms."
-    assert request["evidence"]["no_host"]["entities"] == [DROPPED_FILE]
+    assert judge.messages[:2] == challenger.messages[:2]
+    assert case["checks"][0]["seen"]["evidence_id"] == "file-1"
+    assert request["new_evidence"] == {"no_host": {"entities": [OTHER_FILE]}}
+    assert BENIGN_REPORT["reasoning"] not in json.dumps(judge.messages)
+    assert (report["verdict"], report["draft_report"]) == (
+        "malicious",
+        {"submission": BENIGN_REPORT},
+    )
+    assert report["ruling"]["checks"] == [
+        {
+            "n": 1,
+            "look_for": "Who wrote the script.",
+            "result": "confirms",
+            "observed": [
+                {"evidence_id": "file-1", "values": {"path": DROPPED_FILE["properties"]["path"]}}
+            ],
+            "why": "A remote shell wrote it.",
+        }
+    ]
     assert sent == Send({"submission": REWRITTEN_REPORT})
-    event = json.loads(path.read_text().splitlines()[-1])
-    assert (event["kind"], event["fallback"]) == ("report_written", None)
+    ruled = next(
+        json.loads(line)
+        for line in path.read_text().splitlines()
+        if json.loads(line)["kind"] == "verdict_ruled"
+    )
+    assert (ruled["verdict"], ruled["flipped"], ruled["fallback"]) == ("malicious", True, None)
+
+
+def test_a_ruling_on_a_value_the_evidence_lacks_is_repaired_once_then_read_as_unobserved() -> None:
+    """A result must rest on a value the evidence shows: the challenger is told once, and a
+    second miss keeps its verdict with the check read as not observed."""
+    investigation, _, judge = to_ruling()
+    reply = ruling("benign", seen("file-404", "path"), result="refutes")
+
+    repair = investigation.after_review(judge, reply)
+    assert isinstance(repair, Review)
+    reporter = investigation.after_review(repair, reply)
+
+    assert "'file-404', which is not in the evidence" in repair.messages[-1]["content"]
+    assert repair.messages[: len(judge.messages)] == judge.messages
+    assert to_reporter(reporter) == {"submission": BENIGN_REPORT}
+    assert investigation.ruling is not None
+    (check,) = investigation.ruling["checks"]
+    assert (check["result"], check["observed"]) == ("not_observed", [])
+
+
+def test_with_the_ruling_switched_off_the_head_decides_after_the_challenge() -> None:
+    """With the kill switch off, the head is told its verdict rests on the facts, and its
+    next report goes to the reporter with its own verdict, as before ADR 0028."""
+    investigation = Investigation(observation(), ruling=False)
+    sent = investigation.before_call("get_entity", get_entity())
+    assert isinstance(sent, Send)
+    investigation.after_call("get_entity", sent.arguments, ToolOutcome("ok", DROPPED_FILE))
+    challenger = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
+    assert isinstance(challenger, Review)
+
+    answer = investigation.after_review(challenger, challenge(seen("file-1", "path")))
+    reporter = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
+
+    assert isinstance(answer, LocalAnswer)
+    assert "Your verdict must rest on the deciding facts" in answer.feedback["message"]
+    assert "reviewer rules" not in answer.feedback["message"]
+    assert to_reporter(reporter) == {"submission": BENIGN_REPORT}
+
+
+def test_without_a_ruling_the_report_keeps_its_own_verdict() -> None:
+    """The run never depends on the ruling turn: the head's draft goes to the reporter."""
+    investigation, _, judge = to_ruling()
+
+    reporter = investigation.after_review(judge, None, "APITimeoutError")
+
+    assert to_reporter(reporter) == {"submission": BENIGN_REPORT}
+    request = json.loads(reporter.messages[-1]["content"])
+    assert (request["verdict"], "ruling" in request) == ("benign", False)
+    assert investigation.ruling_fallback == "APITimeoutError"
+
+
+@pytest.mark.parametrize("resubmitted", ["malicious", "benign"])
+def test_an_overruled_report_goes_back_to_the_model_once(resubmitted: str) -> None:
+    """When no report for the ruled verdict can be written, the model is told the ruling
+    once: its next report is written for the ruled verdict, or, if it keeps its own, sent
+    with its own."""
+    investigation, _, judge = to_ruling()
+    reporter = investigation.after_review(judge, ruling("malicious", seen("file-1", "path")))
+    assert isinstance(reporter, Review)
+    repair = investigation.after_review(reporter, report_call(BENIGN_REPORT))
+    assert isinstance(repair, Review)
+
+    handed_back = investigation.after_review(repair, report_call(BENIGN_REPORT))
+    draft = REPORT if resubmitted == "malicious" else BENIGN_REPORT
+    next_report = investigation.before_call(FINISH_TOOL, {"submission": draft})
+
+    assert isinstance(handed_back, LocalAnswer)
+    assert "ruled this alert malicious" in handed_back.feedback["message"]
+    assert handed_back.feedback["ruling"]["verdict"] == "malicious"
+    assert to_reporter(next_report) == {"submission": draft}
+    assert json.loads(next_report.messages[-1]["content"])["verdict"] == resubmitted
 
 
 @pytest.mark.parametrize(

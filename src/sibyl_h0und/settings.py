@@ -81,6 +81,10 @@ class Settings(BaseSettings):
         ge=2,
         lt=RUNTIME_CALL_LIMIT,
     )
+    # Kill switches of the newest behaviour, so a run can turn one off without
+    # a code change: the challenger's ruling (ADR 0028) and the alert stage (ADR 0029).
+    agent_challenger_ruling: bool = Field(default=True, validation_alias="AGENT_CHALLENGER_RULING")
+    agent_alert_stage: bool = Field(default=True, validation_alias="AGENT_ALERT_STAGE")
     trace_enabled: bool = Field(default=True, validation_alias="TRACE_ENABLED")
     trace_dir: Path = Field(default_factory=default_trace_dir, validation_alias="TRACE_DIR")
 

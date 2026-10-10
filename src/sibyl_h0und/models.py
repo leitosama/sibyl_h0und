@@ -398,6 +398,29 @@ class Challenge(BaseModel):
     checks: list[ChallengeCheck] = Field(min_length=1, max_length=3)
 
 
+class RulingCheck(BaseModel):
+    """The challenger's own judgment of one of its checks from the facts (ADR 0028)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    n: int = Field(description="Number of the check.")
+    observed: list[SeenFact] = Field(
+        max_length=3, description="Where the evidence shows the value of the check's fact."
+    )
+    result: Literal["confirms", "refutes", "not_observed"]
+    why: str = Field(min_length=1, description="The observed value, read against the check.")
+
+
+class Ruling(BaseModel):
+    """The verdict the challenger rules once its checks were worked on (ADR 0028)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    checks: list[RulingCheck] = Field(min_length=1, max_length=3)
+    verdict: str = Field(min_length=1, description="The verdict of the whole alert.")
+    reasoning: str = Field(min_length=1, description="The few facts the verdict rests on.")
+
+
 def _drop_nulls(value: Any) -> Any:
     """Remove `None` values from dicts at every depth.
 

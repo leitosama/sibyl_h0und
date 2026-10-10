@@ -18,7 +18,7 @@ from sibyl_h0und.agent import SYSTEM_PROMPT, SimpleSGRAgent
 from sibyl_h0und.catalog import FINISH_TOOL
 from sibyl_h0und.investigation import Send
 from sibyl_h0und.llm import NextStepRequestError
-from sibyl_h0und.models import PRACTICE_ARGUMENT_MODELS, Challenge, NextStep, ToolCall
+from sibyl_h0und.models import PRACTICE_ARGUMENT_MODELS, Challenge, NextStep, Ruling, ToolCall
 from sibyl_h0und.replay import load_tasks
 from sibyl_h0und.side_replay import load_cases, side_turn
 from sibyl_h0und.trace import TaskTrace
@@ -41,6 +41,7 @@ class FakeStepClient:
         steps: list[NextStep],
         challenges: tuple[Challenge, ...] = (),
         reports: tuple[ToolCall, ...] = (),
+        rulings: tuple[Ruling, ...] = (),
     ) -> None:
         """Store steps and side-turn replies in their expected request order.
 
@@ -49,10 +50,12 @@ class FakeStepClient:
             challenges: Prepared challenger replies.
             reports: Prepared reporter replies. With no reply left, a side
                 turn fails as a provider would.
+            rulings: Prepared replies of the challenger's ruling turn.
         """
         self.steps = list(steps)
         self.challenges = list(challenges)
         self.reports = list(reports)
+        self.rulings = list(rulings)
         self.requests: list[list[dict[str, Any]]] = []
         self.side_requests: dict[str, list[list[dict[str, Any]]]] = {}
         self.formats: list[dict[str, Any]] = []
@@ -93,7 +96,7 @@ class FakeStepClient:
             NextStepRequestError: When no reply is prepared.
         """
         self.side_requests.setdefault(role, []).append([dict(message) for message in messages])
-        replies = self.challenges if role == "challenger" else self.reports
+        replies = {"challenger": self.challenges, "judge": self.rulings}.get(role, self.reports)
         if not replies:
             raise NextStepRequestError("No valid reply.")
         return replies.pop(0)
@@ -102,14 +105,18 @@ class FakeStepClient:
 class FakeSession:
     """In-memory remote session used by the structured agent test."""
 
-    def __init__(self) -> None:
-        """Create a task with a JSON-encoded remote tool catalog."""
+    def __init__(self, entities: tuple[str, ...] = ("entity-1",)) -> None:
+        """Create a task with a JSON-encoded remote tool catalog.
+
+        Args:
+            entities: Ids of the entities the alert names.
+        """
         self.task = PublicTask(
             task_id="task-1",
             observation={
                 "last_tool_result": '""',
                 "available_tools": TOOL_CATALOG,
-                "alert_text": json.dumps({"trigger_entities": [{"id": "entity-1"}]}),
+                "alert_text": json.dumps({"trigger_entities": [{"id": item} for item in entities]}),
             },
         )
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -237,7 +244,7 @@ def read_events(path: Path) -> list[dict[str, Any]]:
 
 
 def test_agent_executes_fresh_structured_task_via_remote_session(tmp_path: Path) -> None:
-    """Tool evidence should feed the next step, and the task should leave a trace."""
+    """The alert stage's evidence reaches the first turn, a repeat is free, and all is traced."""
     llm = FakeStepClient(investigation_steps())
     session = FakeSession()
     agent = SimpleSGRAgent(llm, trace_dir=tmp_path, trace_metadata={"model": "m-1"})
@@ -251,17 +258,23 @@ def test_agent_executes_fresh_structured_task_via_remote_session(tmp_path: Path)
         "get_entity",
         "finish_investigation",
     ]
-    assert session.calls[0][1] == {
-        "entity_id": "entity-1",
-        "reasoning": "Inspect the alert entity.",
-    }
+    assert session.calls[0][1]["entity_id"] == "entity-1"
     assert session.calls[1][1] == {"submission": MALICIOUS_SUBMISSION}
-    tool_message = llm.requests[1][-1]
-    assert tool_message["role"] == "tool"
-    assert json.loads(tool_message["content"]) == {
+    # Before the first turn the model already sees the alert stage's call and its evidence.
+    stage_call, stage_answer, stage_summary = llm.requests[0][2:]
+    assert stage_summary["role"] == "user"
+    assert "Before your first turn" in stage_summary["content"]
+    assert stage_call["tool_calls"][0]["function"]["name"] == "get_entity"
+    assert stage_answer["role"] == "tool"
+    assert stage_answer["tool_call_id"] == stage_call["tool_calls"][0]["id"]
+    assert json.loads(stage_answer["content"]) == {
         "status": "ok",
         "result": {"id": "entity-1", "pid": 42},
     }
+    # The model's own fetch of the same entity is answered from the ledger.
+    repeat = json.loads(llm.requests[1][-1]["content"])
+    assert repeat["result"] == {"id": "entity-1", "pid": 42}
+    assert "note" in repeat
     request_text = json.dumps(llm.requests[1])
     assert request_text.count("CATALOG-MARKER") == 1
     assert "entity-1" in str(llm.requests[0][1]["content"])
@@ -270,8 +283,9 @@ def test_agent_executes_fresh_structured_task_via_remote_session(tmp_path: Path)
     events = read_events(run_dir / "001_task-1.trace.jsonl")
     assert [event["kind"] for event in events] == [
         "task_start",
-        "step",
         "tool_call",
+        "step",
+        "tool_cached",
         "step",
         "report_written",
         "tool_call",
@@ -279,13 +293,30 @@ def test_agent_executes_fresh_structured_task_via_remote_session(tmp_path: Path)
     ]
     assert events[0]["payload"]["run"] == {"model": "m-1"}
     assert "available_tools" in events[0]["payload"]["task"]["observation"]
-    assert events[2]["tool"] == "get_entity"
-    assert json.loads(events[2]["payload"]["response"]["observation"]["last_tool_result"]) == {
+    assert events[1]["tool"] == "get_entity"
+    assert [event["alert_stage"] for event in events if event["kind"] == "tool_call"] == [
+        True,
+        False,
+    ]
+    assert json.loads(events[1]["payload"]["response"]["observation"]["last_tool_result"]) == {
         "id": "entity-1",
         "pid": 42,
     }
     assert events[-1]["completion_reason"] == "terminated"
     assert events[-1]["runtime_calls"] == 2
+
+
+def test_the_alert_stage_switched_off_leaves_the_first_calls_to_the_model() -> None:
+    """With the kill switch off, nothing reaches the runtime before the model's first turn."""
+    llm = FakeStepClient(investigation_steps())
+    session = FakeSession()
+    agent = SimpleSGRAgent(llm, alert_stage=False)
+
+    asyncio.run(agent.run(cast(RemoteBenchmarkClient, FakeClient(session))))
+
+    assert len(llm.requests[0]) == 2
+    assert [name for name, _ in session.calls] == ["get_entity", "finish_investigation"]
+    assert "note" not in json.loads(llm.requests[1][-1]["content"])
 
 
 def test_trace_write_failure_does_not_break_the_run(tmp_path: Path) -> None:
@@ -349,9 +380,10 @@ def test_ledger_answers_invented_ids_and_repeats_without_the_runtime(tmp_path: P
     (run_dir,) = tmp_path.iterdir()
     events = read_events(run_dir / "001_task-1.trace.jsonl")
     assert [event["kind"] for event in events if event["kind"].startswith("tool_")] == [
+        "tool_call",
         "tool_rejected",
         "tool_invalid",
-        "tool_call",
+        "tool_cached",
         "tool_cached",
         "tool_rejected",
         "tool_rejected",
@@ -370,7 +402,7 @@ def test_knowledge_lookup_is_answered_locally_and_costs_no_runtime_call(tmp_path
 
     asyncio.run(agent.run(cast(RemoteBenchmarkClient, FakeClient(session))))
 
-    assert [name for name, _ in session.calls] == ["finish_investigation"]
+    assert [name for name, _ in session.calls] == ["get_entity", "finish_investigation"]
     opening = json.loads(llm.requests[0][1]["content"])
     assert "lookup_knowledge" in [tool["name"] for tool in opening["available_tools"]]
     offered = llm.formats[0]["json_schema"]["schema"]["properties"]["function"]["anyOf"]
@@ -384,31 +416,27 @@ def test_knowledge_lookup_is_answered_locally_and_costs_no_runtime_call(tmp_path
 
 
 def test_agent_reserves_the_last_runtime_call_for_the_report(tmp_path: Path) -> None:
-    """At the ceiling the model is told to finish, and other tools no longer reach the runtime."""
-    llm = FakeStepClient(
-        [
-            get_entity_step("entity-invented"),
-            get_entity_step("entity-1"),
-            get_entity_step("entity-2"),
-            investigation_steps()[1],
-        ]
-    )
-    session = FakeSession()
+    """The alert stage stops at the ceiling, and then only the report reaches the runtime."""
+    llm = FakeStepClient([get_entity_step("entity-2"), investigation_steps()[1]])
+    session = FakeSession(entities=("entity-1", "entity-2"))
     agent = SimpleSGRAgent(llm, max_runtime_calls=2, trace_dir=tmp_path)
 
     result = asyncio.run(agent.run(cast(RemoteBenchmarkClient, FakeClient(session))))
 
     assert result.successful_tasks == 1
-    # The locally answered first turn did not use up the ceiling of two calls.
-    assert [name for name, _ in session.calls] == ["get_entity", "finish_investigation"]
-    notice = llm.requests[2][-1]
+    # The stage fetched one of the two alert entities and left the last call for the report.
+    assert [(name, arguments.get("entity_id")) for name, arguments in session.calls] == [
+        ("get_entity", "entity-1"),
+        ("finish_investigation", None),
+    ]
+    notice = llm.requests[0][-1]
     assert notice["role"] == "user"
     assert "Only finish_investigation remains" in notice["content"]
-    finish_only = llm.formats[2]["json_schema"]["schema"]["properties"]["function"]["anyOf"]
+    finish_only = llm.formats[0]["json_schema"]["schema"]["properties"]["function"]["anyOf"]
     assert [option["properties"]["tool"]["enum"] for option in finish_only] == [
         ["finish_investigation"]
     ]
-    assert "cannot be called now" in json.loads(llm.requests[3][-1]["content"])["message"]
+    assert "cannot be called now" in json.loads(llm.requests[1][-1]["content"])["message"]
     (run_dir,) = tmp_path.iterdir()
     kinds = [event["kind"] for event in read_events(run_dir / "001_task-1.trace.jsonl")]
     assert kinds.count("finish_only") == 1
@@ -463,8 +491,21 @@ CHALLENGE = Challenge.model_validate(
         ],
     }
 )
-# The head's answers to the checks, in the state of the report it submits next.
-CHECK_ANSWERS = "1: started by a remote logon -> confirms. 2: pid 42 -> confirms."
+RULING = Ruling.model_validate(
+    {
+        "checks": [
+            {"n": 1, "observed": [], "result": "not_observed", "why": "Not opened."},
+            {
+                "n": 2,
+                "observed": [{"evidence_id": "entity-1", "property_fields": ["pid"]}],
+                "result": "confirms",
+                "why": "pid 42 is the payload's.",
+            },
+        ],
+        "verdict": "malicious",
+        "reasoning": "entity-1 runs as the payload's process.",
+    }
+)
 
 
 def challenged_run(
@@ -472,6 +513,7 @@ def challenged_run(
     steps: list[NextStep] | None = None,
     max_runtime_calls: int = 95,
     reports: tuple[ToolCall, ...] = (),
+    rulings: tuple[Ruling, ...] = (),
 ) -> tuple[FakeStepClient, FakeSession]:
     """Run a task; by default its benign report is challenged and then turned malicious."""
     llm = FakeStepClient(
@@ -479,13 +521,12 @@ def challenged_run(
         or [
             get_entity_step("entity-1"),
             benign_finish_step("entity-1", "pid"),
-            make_step("finish_investigation", submission=MALICIOUS_SUBMISSION).model_copy(
-                update={"current_state": CHECK_ANSWERS}
-            ),
+            make_step("finish_investigation", submission=MALICIOUS_SUBMISSION),
         ],
         # The check that repeats a call is asked once more; the same reply then stands.
         (CHALLENGE, CHALLENGE),
         reports,
+        rulings,
     )
     session = FakeSession()
     agent = SimpleSGRAgent(llm, max_runtime_calls=max_runtime_calls, trace_dir=tmp_path / "traces")
@@ -581,13 +622,30 @@ def test_the_reporters_report_reaches_the_runtime_after_one_repair(tmp_path: Pat
     assert second[: len(first)] == first
 
 
+def test_the_harness_replays_the_ruling_turn_as_the_agent_asked_it(tmp_path: Path) -> None:
+    """Cut at the first report after the challenge, a saved task asks the challenger for the
+    ruling the live agent asked for, in the same conversation, and gets the same ruling."""
+    llm, _ = challenged_run(tmp_path, rulings=(RULING,))
+
+    (case,) = load_cases(tmp_path / "traces", role="judge")
+    replay_llm = FakeStepClient([], rulings=(RULING,))
+    asyncio.run(side_turn(case, replay_llm))
+
+    (live,) = llm.side_requests["judge"]
+    assert live[:2] == llm.side_requests["challenger"][-1][:2]
+    assert replay_llm.side_requests["judge"] == [live]
+    assert case.investigation.ruling is not None
+    assert case.investigation.ruling["verdict"] == "malicious"
+    assert "reporter" not in replay_llm.side_requests
+
+
 def test_the_harness_replays_the_reporter_turn_as_the_agent_asked_it(tmp_path: Path) -> None:
     """Cut at the report that was sent, a saved task gives the reporter the head's draft,
     not the rewrite the runtime got, and asks what the live agent asked, the challenger's
-    recorded case and the head's answers to it included."""
+    recorded case and ruling included."""
     rewrite = {**MALICIOUS_SUBMISSION, "reasoning": "entity-1 ran the suspicious chain."}
     report = ToolCall.model_validate({"tool": FINISH_TOOL, "submission": rewrite})
-    llm, session = challenged_run(tmp_path, reports=(report,))
+    llm, session = challenged_run(tmp_path, reports=(report,), rulings=(RULING,))
 
     (case,) = load_cases(tmp_path / "traces", role="reporter")
     replay_llm = FakeStepClient([], reports=(report,))
@@ -596,6 +654,8 @@ def test_the_harness_replays_the_reporter_turn_as_the_agent_asked_it(tmp_path: P
     assert session.calls[-1][1] == {"submission": rewrite}
     assert case.review.arguments == {"submission": MALICIOUS_SUBMISSION}
     (live,) = llm.side_requests["reporter"]
-    assert json.loads(live[-1]["content"])["challenge"]["answers"] == CHECK_ANSWERS
+    assert json.loads(live[-1]["content"])["ruling"]["checks"][1]["observed"] == [
+        {"evidence_id": "entity-1", "values": {"pid": 42}}
+    ]
     assert replay_llm.side_requests["reporter"] == llm.side_requests["reporter"]
     assert answer == Send({"submission": rewrite})

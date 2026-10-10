@@ -1,6 +1,6 @@
 """Run one side turn of the finish gate alone over saved traces.
 
-Usage: uv run python scripts/replay_side_turn.py [--role challenger|reporter]
+Usage: uv run python scripts/replay_side_turn.py [--role challenger|judge|reporter]
        [--split dev|holdout|all] [--run TEXT] [--wrong-only] [--limit N] [--out PATH]
 """
 

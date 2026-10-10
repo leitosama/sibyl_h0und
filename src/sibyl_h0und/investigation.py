@@ -1,11 +1,14 @@
-"""Everything one task knows about its investigation, behind three operations.
+"""Everything one task knows about its investigation, behind a few operations.
 
-The agent loop asks `before_call` what to do with the model's call and gives
-the runtime's answer to `after_call`. When the call needs a side turn of the
-LLM first (the benign challenger, ADR 0022), the loop runs it and gives its
-reply to `after_review`. The tool catalog, GraphLedger, the `still_open`
-merge, the local knowledge lookup, the side turns' requests, the wording of
-local answers and the trace events of those decisions all live here.
+Before the model's first turn, the agent loop makes the calls `alert_stage_call`
+returns: the alert stage opens the alert's entities and their relations
+(ADR 0029). Then the loop asks `before_call` what to do with the model's call
+and gives the runtime's answer to `after_call`. When the call needs a side turn
+of the LLM first (the benign challenger and its ruling, the reporter; ADR 0022,
+0023, 0028), the loop runs it and gives its reply to `after_review`. The tool
+catalog, GraphLedger, the `still_open` merge, the local knowledge lookup, the
+side turns' requests, the wording of local answers and the trace events of
+those decisions all live here.
 """
 
 from dataclasses import dataclass
@@ -14,11 +17,12 @@ from typing import Any
 from loguru import logger
 from pydantic import BaseModel
 
+from sibyl_h0und.alert_stage import AlertStage, StageCall
 from sibyl_h0und.catalog import FINISH_TOOL, ToolCatalog
 from sibyl_h0und.digest import evidence_digest
 from sibyl_h0und.ledger import COUNTED_FANOUT_PAGES, GraphLedger, listing
 from sibyl_h0und.llm import render_json
-from sibyl_h0und.models import Challenge, SeenSource, ToolCall
+from sibyl_h0und.models import Challenge, Ruling, SeenSource, ToolCall
 from sibyl_h0und.outcome import ToolOutcome, decode_json
 from sibyl_h0und.trace import TaskTrace
 from sibyl_h0und.vocabulary import KNOWLEDGE_TOOL, KNOWLEDGE_TOOL_SPEC, shared
@@ -50,16 +54,74 @@ BENIGN_CHALLENGE = (
     "before submitting. Answer from the evidence: why did the detection fire? What came "
     "one stage before the trigger on the kill chain (how it started: parent, logon and "
     "its source, delivery) and one stage after (what it led to: children, written or "
-    "changed files, persistence, connections and the hosts they reach)? If a stage is "
-    "not opened yet (`still_open` lists what is known but unvisited), open it; do not "
+    "changed files, persistence, connections and the hosts they reach)? Answer the "
+    "tactic check of each tactic involved from the evidence at its place to look. If a "
+    "stage is not opened yet (`still_open` lists what is known but unvisited), open it; do not "
     "repeat calls. If the evidence already answers all of this, submit the report "
     "again, malicious or benign as the evidence says."
+)
+# One basic question per ATT&CK tactic, where its answer lies in the graph and
+# the normal-looking reading that does not answer it. The head and the
+# challenger share it, so a benign verdict and the case against it ask the same
+# questions. Authored guidance, not source data, so it stays out of the
+# knowledge packs (ADR 0017). General wording: no technique id, program, port or
+# relation type. Tactic names follow the ATT&CK pack.
+TACTIC_CHECKS = """
+Tactic checks. Each gives the question, where in the evidence to look and, after
+"not an answer", the reading that makes the activity look normal without answering
+the question. ATT&CK splits defense evasion into stealth and defense-impairment.
+- initial-access: how did the actor first arrive? The session's first logon or
+  inbound connection; what delivered the first process (mail, download, removable
+  media, remote service). Not an answer: a valid account, a user opening a file.
+- execution: what ran, started by whom, with what content? The process creation
+  chain, command and script text, the task, service or management agent that launched
+  it. Not an answer: an interpreter run by an admin tool.
+- persistence: will it come back? Services, tasks, autostart entries and accounts
+  created or changed: who made them, what they point to. Not an answer: an installer
+  or management tool made it.
+- privilege-escalation: did it end with more rights than it started with? User or
+  integrity change from parent to child, new group membership, SYSTEM running a file
+  a user wrote. Not an answer: services run as SYSTEM anyway.
+- stealth: is something pretending to be something else? Name, path, signature and
+  parent against what the binary claims to be, injected threads, hidden files. Not an
+  answer: a signed name in a standard path.
+- defense-impairment: was protection or visibility reduced? Stopped or deleted
+  services, disabled agents, cleared or changed logs, firewall changes. Not an
+  answer: maintenance.
+- credential-access: did anything touch secrets? Access to the process that holds
+  credentials, reads of credential files or hives, directory replication requests,
+  bursts of failed logons. Not an answer: a security agent did it.
+- discovery: did something enumerate the environment? Bursts of short queries about
+  users, groups, hosts, shares, the domain. Not an answer: an admin console.
+- lateral-movement: did the actor reach another host, and what did it do there? The
+  logon's source host and type, remote service or task creation, inbound connections
+  to system processes, the source's activity before and the target's after. Not an
+  answer: a valid account from an internal host.
+- collection: was data gathered? Many reads of documents or a database, archives,
+  staging folders. Not an answer: backup, export.
+- command-and-control: is a remote party steering it? Repeated connections to one
+  destination over time, a process that should not talk out, one rare destination
+  among many, tunnels and listeners. Not an answer: a busy browser or agent.
+- exfiltration: did data leave? A staged or archived file followed by an outbound
+  transfer, its volume, sync or cloud destinations. Not an answer: cloud sync.
+- impact: was data, a service or availability changed? Writes to business data
+  (records changed, files rewritten in place), deleted backups, mass renames, stopped
+  services. Not an answer: an admin script.
+An answer is what the evidence at the place to look shows: what happened and why it
+is or is not hostile. "Nothing seen" there answers only if that place was opened.
+""".strip()
+# Said once after the alert stage's calls in the model's history (ADR 0029).
+ALERT_STAGE_NOTE = (
+    "Before your first turn, the harness made the calls above: it fetched each entity the "
+    "alert names and listed its relations by a search on its id, all pages within an hour "
+    "of the alert's activity for an entity with many. Build on their results; repeating "
+    "them returns the same results."
 )
 CHALLENGER_ROLE = "challenger"
 # The challenger argues the opposite of a benign verdict from the evidence
 # alone (ADR 0022). Written from general principles: no program, port,
 # relation type or scenario of any practice task.
-CHALLENGER_PROMPT = """
+CHALLENGER_PROMPT = f"""
 You are a threat hunter reviewing an investigation before it closes. A detection (a SIEM
 rule, an EDR or an antivirus) raised the alert, and the investigation is about to call it
 benign. You see the alert, the tools, every piece of evidence the investigation gathered
@@ -85,14 +147,45 @@ Your job is to argue the opposite verdict.
 - Judge what each entity did, to what and from where, not what it is called. A familiar
   name, a signature, a usual parent or a plausible purpose does not refute an attack.
   An entity with many relations of which few were opened is a place an attack can hide.
-- Always argue the attack, even when the evidence looks clean and your case is weak: the
-  investigation weighs it and decides. A weak case is still worth making when its checks
-  open what nobody has looked at.
+- Place the case on the tactics below and pick the one to three whose questions it rests
+  on. A check decides one such question: its place to look is where the fact lies, and its
+  "not an answer" reading is the innocent one the check must rule out or confirm.
+- Always argue the attack, even when the evidence looks clean and your case is weak. A weak
+  case is still worth making when its checks open what nobody has looked at.
+- The investigation then works on your checks, and you rule on the verdict from what they
+  show. Write `confirms_if` and `refuted_if` as values you can tell apart then.
+
+{TACTIC_CHECKS}
 
 Evidence layout: `hosts` groups each host with the entities and relations nearest to it;
 `between_hosts` holds relations that join entities of different hosts; `no_host` holds
 what no host reaches. `unvisited_relation_ids` on an entity lists its relations never
 opened.
+
+Return exactly one JSON object matching the supplied schema, with no prose.
+""".strip()
+JUDGE_ROLE = "judge"
+# Continues the challenger's conversation once the head has worked on its
+# checks: the challenger rules on the verdict (ADR 0028). General principles only.
+JUDGE_PROMPT = """
+Arguing is over: you now decide the verdict, and the report is written for your verdict.
+Since your challenge the investigation has worked on your checks. `new_evidence` holds every
+object that is new or changed since then, in the same layout; `still_open` lists what is
+still unvisited.
+
+- Rule on each of your checks from the value the evidence shows for its `look_for`,
+  read against the `confirms_if` and `refuted_if` you wrote before you saw it: `confirms`,
+  `refutes`, or `not_observed` when the evidence does not show that fact. In `observed`,
+  cite the ids and property fields that hold the value; a result the evidence does not show
+  is `not_observed`. In `why`, give the value and how it reads.
+- Then rule on the whole alert. A detection fired on this activity. Benign needs evidence
+  that positively explains it: who did it, under which account and logon, started by what,
+  and why that fits; a check that confirms the attack stands against it, and a check left
+  `not_observed` is an open question, not a refutation. A reading the tactic checks call
+  "not an answer" refutes nothing, and "nothing seen" counts only where that place was
+  opened. Malicious needs the facts that make it an attack, not a suspicion alone. A
+  familiar name, a signature, a usual parent or a plausible purpose decides neither way.
+- `reasoning` names the few facts the verdict rests on.
 
 Return exactly one JSON object matching the supplied schema, with no prose.
 """.strip()
@@ -103,11 +196,13 @@ REPORTER_PROMPT = """
 You are the incident responder who writes the final report of an investigation. The
 investigation has reached its verdict; your job is to make the report right for that
 verdict. You see the alert, every piece of evidence the investigation gathered, what is
-still unvisited, the investigation's draft report and, if one was raised, a reviewer's
-challenge to a benign draft with the investigation's answers to it.
+still unvisited, the verdict, the investigation's draft report and, if one was raised, a
+reviewer's challenge to a benign draft with the reviewer's ruling on it.
 
 Write the report as one call of the report tool:
-- Keep the draft's verdict. Do not change it.
+- Write it for the given `verdict`. Do not change it. When the draft gives another verdict,
+  the reviewer overruled it: the draft only shows what the investigation looked at, so
+  choose every citation anew for the given verdict.
 - Cite only ids that appear in the alert or the evidence, and only entities that belong to
   the incident. An entity the investigation visited is not part of the incident just
   because it was visited; extra entities are penalized like missing ones.
@@ -129,8 +224,8 @@ Write the report as one call of the report tool:
   evidence shows for that entity or relation.
 - The reasoning tells the chain in a few sentences: stages, techniques and entities; for
   benign, why each suspicious-looking action is explained. If a reviewer raised checks,
-  answer each with the value the evidence shows; `challenge.answers`, when present,
-  holds the investigation's own answers.
+  answer each with the value the evidence shows; `ruling`, when present, holds the
+  reviewer's reading of each check and the facts its verdict rests on.
 
 Evidence layout: `hosts` groups each host with the entities and relations nearest to it;
 `between_hosts` holds relations that join entities of different hosts; `no_host` holds
@@ -150,7 +245,7 @@ CHALLENGE_REPAIR = (
     "`unvisited_relation_ids`. Return the whole challenge again as one JSON object matching "
     "the schema."
 )
-# What the head is told with the challenger's case.
+# What the head is told with the challenger's case: it gathers, the challenger rules (ADR 0028).
 CHALLENGE_ANSWER = (
     "A benign verdict overrules the detection that raised this alert, so a reviewer who did "
     "not see your reasoning read the same evidence and argues it is an attack. `challenge` "
@@ -158,10 +253,29 @@ CHALLENGE_ANSWER = (
     "(`look_for`), what confirms the attack and what refutes it. `seen` points at evidence "
     "you already have and shows its values; `call` would show a fact not seen yet (a "
     "repeated call returns its earlier result). `still_open` lists what is known but "
-    "unvisited. Make the calls you need. In the `current_state` of the step that submits the "
-    "report again, answer every check, one line each: `<n>: <the value you observed> -> "
-    "confirms | refutes | cannot check (why)`. A check answered with a fact other than the one "
-    "it names is not answered. Submit the report malicious or benign as the answers say."
+    "unvisited. {who_decides} Make the calls the checks need, follow what they show one "
+    "stage further, then submit the report again, malicious or benign as the evidence says."
+)
+# Who decides the verdict after the challenge, as the head is told it.
+RULING_DECIDES = (
+    "The reviewer rules on the verdict from the evidence, not from your reading of it: your "
+    "job now is to put each deciding fact in the evidence."
+)
+HEAD_DECIDES = "Your verdict must rest on the deciding facts, so put each of them in the evidence."
+# What the challenger is told once when its ruling cites what the evidence does not hold.
+RULING_REPAIR = (
+    "The ruling needs a fix: {problems} Return the whole ruling again as one JSON object "
+    "matching the schema."
+)
+# What the head is told when the report for the challenger's verdict could not be written.
+RULING_HANDBACK = (
+    "The reviewer ruled this alert {verdict} from the evidence; `ruling` gives its reading of "
+    "each check and the facts the verdict rests on. Submit a {verdict} report."
+)
+# What the head is told once when its report keeps a verdict the challenger overruled.
+VERDICT_REFUSAL = (
+    "the reviewer ruled this alert {verdict} from the evidence (see `ruling`), so a report "
+    "with another verdict is not sent. Submit a {verdict} report."
 )
 
 
@@ -222,12 +336,20 @@ class Reply:
 class Investigation:
     """Per-task state and rules that turn tool calls and responses into messages."""
 
-    def __init__(self, observation: dict[str, Any], trace: TaskTrace | None = None) -> None:
+    def __init__(
+        self,
+        observation: dict[str, Any],
+        trace: TaskTrace | None = None,
+        *,
+        ruling: bool = True,
+    ) -> None:
         """Build the catalog, ledger and knowledge vocabulary of one task.
 
         Args:
             observation: Public task observation with a JSON-encoded `available_tools`.
             trace: Task trace that receives the events of local decisions.
+            ruling: Whether the challenger rules on the report after its checks
+                (ADR 0028); off, the head's verdict stands as before.
 
         Raises:
             ValueError: If the observation has an invalid tool catalog.
@@ -247,16 +369,30 @@ class Investigation:
         self._benign_challenged = False
         # The challenger's case the head was given, for the reporter.
         self._challenge_record: dict[str, Any] | None = None
-        # The head's answers to its checks, from the state of its report the reporter gets.
-        self._challenge_answers: str | None = None
+        # The challenger's request and case, which its ruling continues (ADR 0028).
+        self._judge_opening: list[dict[str, Any]] | None = None
+        # Each object as the challenger saw it, to show the ruling only what changed.
+        self._challenged_objects: dict[str, str] = {}
+        self._judged = False
+        self._ruling_enabled = ruling
+        # The challenger's ruling: its reading of each check and the verdict, or `None`.
+        self.ruling: dict[str, Any] | None = None
+        # Why the challenger gave no usable ruling, or `None`.
+        self.ruling_fallback: str | None = None
+        # The ruled verdict in lower case while it holds.
+        self._ruled_verdict: str | None = None
+        self._verdict_refused = False
         # The challenger's case before its repair turn, kept if the repair gives nothing.
         self._unrepaired: tuple[str, list[dict[str, Any]]] = ("", [])
+        # The challenger's ruling before its repair turn, kept if the repair gives nothing.
+        self._unrepaired_ruling: dict[str, Any] | None = None
         # Whether the report last sent is the reporter's rewrite of the head's.
         self._rewritten = False
         # Why the last report sent is the head's own, or `None` (ADR 0023).
         self.report_fallback: str | None = None
         # A search scoped to a relation type lists an entity's relations by its id.
         self._relation_search = self.catalog.relation_search()
+        self._stage = AlertStage(self.catalog, self.alert, self._ledger)
 
     def opening_message(self) -> dict[str, Any]:
         """Return the first user message: the alert and the tool catalog, once."""
@@ -271,13 +407,35 @@ class Investigation:
             ),
         }
 
+    def alert_stage_call(self, outcome: ToolOutcome | None = None) -> StageCall | None:
+        """Return the alert stage's next call, made before the model's first turn.
+
+        The stage fetches each alert entity and lists its relations by a
+        search on its id (ADR 0029). Give the runtime's answer to each call
+        to `after_call` with `alert_stage=True`, then to this method.
+
+        Args:
+            outcome: The runtime's answer to the previous stage call, or
+                `None` for the first.
+
+        Returns:
+            The next call to send, or `None` when the stage is over.
+        """
+        return self._stage.next_call(outcome)
+
+    def alert_stage_summary(self) -> dict[str, Any]:
+        """Return the message that closes the alert stage: who made the calls, what is open."""
+        summary: dict[str, Any] = {"note": ALERT_STAGE_NOTE}
+        if open_items := self._ledger.summary():
+            summary["still_open"] = open_items
+        return {"role": "user", "content": render_json(summary)}
+
     def before_call(
         self,
         tool: str,
         arguments: dict[str, Any],
         *,
         finish_only: bool = False,
-        state: str | None = None,
     ) -> LocalAnswer | Send | Review:
         """Decide whether the model's call reaches the runtime.
 
@@ -287,15 +445,15 @@ class Investigation:
         placeholder report (ADR 0018) and the first report whose citations are
         not entities of the graph or act on the wrong type (ADR 0024). The
         first benign report outside the finish-only mode goes to the challenger
-        first (ADR 0020, 0022); a report that is to be sent goes to the
-        reporter first (ADR 0023).
+        first (ADR 0020, 0022), and the first report after its checks goes back
+        to the challenger for a ruling on the verdict; a report that keeps a
+        verdict the challenger overruled is refused once (ADR 0028). A report
+        that is to be sent goes to the reporter first (ADR 0023).
 
         Args:
             tool: Tool the model chose.
             arguments: Arguments the model chose, without nulls.
             finish_only: Whether only `finish_investigation` may be called.
-            state: The model's `current_state` of this step; after a challenge,
-                a report's state holds the answers to the checks (ADR 0026).
 
         Returns:
             A local answer, the prepared arguments to send, or the side turn
@@ -364,6 +522,28 @@ class Investigation:
             logger.warning("Refused report citations once: {}", citations)
             self.trace.local_answer("citations_refused", tool, arguments, feedback)
             return LocalAnswer(feedback)
+        if tool == FINISH_TOOL and self._overruled(arguments):
+            if not self._verdict_refused:
+                # Refused once, like a placeholder: a stubborn model must still finish.
+                self._verdict_refused = True
+                refusal = VERDICT_REFUSAL.format(verdict=self._ruling_verdict())
+                feedback = {
+                    "status": "error",
+                    "message": f"Not sent to the runtime: {refusal}",
+                    "ruling": self.ruling,
+                }
+                logger.warning("Refused a report that keeps an overruled verdict once.")
+                self.trace.local_answer("verdict_refused", tool, arguments, feedback)
+                return LocalAnswer(feedback)
+            logger.warning("The model kept its verdict against the ruling; sending its report.")
+            self._ruled_verdict = None
+        if tool == FINISH_TOOL and self._judge_opening is not None and not self._judged:
+            # Once: the challenger rules on the first report after its checks, whatever its verdict.
+            self._judged = True
+            logger.info("Asking the challenger to rule on the verdict.")
+            return Review(
+                JUDGE_ROLE, arguments, self._judge_request(), self.catalog.ruling_format(), Ruling
+            )
         if challenge:
             # Once: the model may still be right, and at the ceiling it cannot look further.
             self._benign_challenged = True
@@ -378,15 +558,48 @@ class Investigation:
                 self.catalog.challenge_format(tools),
                 Challenge,
             )
-        if tool == FINISH_TOOL and (report_format := self.catalog.report_format()) is not None:
-            if self._challenge_record is not None and state and self._challenge_answers is None:
-                # The first report after the challenge that is not refused answers it.
-                self._challenge_answers = state
+        if tool == FINISH_TOOL:
+            return self._to_report(arguments)
+        return Send(arguments)
+
+    def _to_report(self, draft: dict[str, Any]) -> LocalAnswer | Send | Review:
+        """Give a report that is to be sent to the reporter, or send it as it is.
+
+        Without a report schema there is no reporter: a draft with the ruled
+        verdict is sent, one with another verdict goes back to the model.
+        """
+        if (report_format := self.catalog.report_format()) is not None:
             logger.info("Asking the reporter to write the report.")
             return Review(
-                REPORTER_ROLE, arguments, self._reporter_request(arguments), report_format, ToolCall
+                REPORTER_ROLE, draft, self._reporter_request(draft), report_format, ToolCall
             )
-        return Send(arguments)
+        if self._overruled(draft):
+            return self._hand_back(draft)
+        return Send(draft)
+
+    def _overruled(self, draft: dict[str, Any]) -> bool:
+        """Tell whether the challenger's ruling holds and gives the report another verdict."""
+        return self._ruled_verdict is not None and report_verdict(draft) != self._ruled_verdict
+
+    def _ruling_verdict(self) -> str:
+        """The ruled verdict as the report tool spells it."""
+        return str((self.ruling or {}).get("verdict"))
+
+    def _hand_back(self, draft: dict[str, Any]) -> LocalAnswer:
+        """Return the report to the model with the ruling it must write the report for."""
+        feedback = {
+            "status": "error",
+            "message": "Not sent to the runtime: "
+            + RULING_HANDBACK.format(verdict=self._ruling_verdict()),
+            "ruling": self.ruling,
+        }
+        if open_items := self._ledger.summary():
+            feedback["still_open"] = open_items
+        # The model is told the ruling once: a report that keeps its verdict is then sent.
+        self._verdict_refused = True
+        logger.warning("No report for the ruled verdict; asking the model for one.")
+        self.trace.local_answer("verdict_handed_back", FINISH_TOOL, draft, feedback)
+        return LocalAnswer(feedback)
 
     def after_review(
         self, review: Review, reply: BaseModel | None, error: str | None = None
@@ -404,6 +617,8 @@ class Investigation:
         """
         if review.role == REPORTER_ROLE:
             return self._report(review, reply if isinstance(reply, ToolCall) else None, error)
+        if review.role == JUDGE_ROLE:
+            return self._rule(review, reply if isinstance(reply, Ruling) else None, error)
         challenge = reply if isinstance(reply, Challenge) else None
         checks, problems = self._screen_checks(challenge) if challenge is not None else ([], [])
         if challenge is not None and problems and not review.repaired:
@@ -426,7 +641,160 @@ class Investigation:
         if review.repaired and not checks and self._unrepaired[1]:
             # A failed repair does not cost the checks the first reply got right.
             hypothesis, checks = self._unrepaired
-        return self._challenge(review.arguments, hypothesis, checks, error)
+        answer = self._challenge(review.arguments, hypothesis, checks, error)
+        if self._challenge_record is not None and self._ruling_enabled:
+            # The ruling continues this conversation from the case the head was given.
+            self._judge_opening = [
+                *review.messages[:2],
+                {"role": "assistant", "content": render_json(self._challenge_record)},
+            ]
+            self._challenged_objects = {
+                key: render_json(value) for key, value in self._ledger.objects.items()
+            }
+        return answer
+
+    def _judge_request(self) -> list[dict[str, Any]]:
+        """Continue the challenger's conversation with what is new since its case."""
+        changed = {
+            key
+            for key, value in self._ledger.objects.items()
+            if self._challenged_objects.get(key) != render_json(value)
+        }
+        # An entity whose relation was opened shows again, with what is still unvisited.
+        changed |= {
+            value[end]
+            for key, value in self._ledger.objects.items()
+            if key in changed and key in self._ledger.relations
+            for end in ("source_id", "target_id")
+            if isinstance(value.get(end), str) and value[end] in self._ledger.objects
+        }
+        request: dict[str, Any] = {
+            "instruction": JUDGE_PROMPT,
+            "new_evidence": evidence_digest(self._ledger, only=changed),
+        }
+        if open_items := self._ledger.summary():
+            request["still_open"] = open_items
+        return [*(self._judge_opening or []), {"role": "user", "content": render_json(request)}]
+
+    def _rule(
+        self, review: Review, reply: Ruling | None, error: str | None
+    ) -> LocalAnswer | Send | Review:
+        """Take the challenger's ruling, ask it once to repair one, then go to the report.
+
+        Without a usable ruling the report keeps its own verdict (ADR 0009).
+
+        Args:
+            review: The ruling turn.
+            reply: The challenger's ruling, or `None` when the turn failed.
+            error: Why the turn failed, if it did.
+
+        Returns:
+            The ruling's repair turn, or what the report gets next.
+        """
+        draft = review.arguments
+        ruling, problems = self._screen_ruling(reply) if reply is not None else (None, [])
+        if reply is not None and problems and not review.repaired:
+            logger.warning("The ruling needs a repair ({}); asking once more.", problems)
+            self._unrepaired_ruling = ruling
+            messages = [
+                *review.messages,
+                {"role": "assistant", "content": render_json(reply.model_dump())},
+                {"role": "user", "content": RULING_REPAIR.format(problems=" ".join(problems))},
+            ]
+            return Review(
+                review.role,
+                draft,
+                messages,
+                review.response_format,
+                review.model,
+                repaired=True,
+            )
+        if ruling is None and review.repaired:
+            # A failed repair does not cost the ruling the first reply gave.
+            ruling = self._unrepaired_ruling
+        self.ruling = ruling
+        self.ruling_fallback = None if ruling is not None else (error or " ".join(problems))
+        if ruling is None:
+            logger.warning(
+                "No usable ruling ({}); the report keeps its verdict.", self.ruling_fallback
+            )
+        else:
+            self._ruled_verdict = str(ruling["verdict"]).lower()
+            logger.info("The challenger ruled {}.", ruling["verdict"])
+        self.trace.verdict_ruled(
+            draft, ruling, self.ruling_fallback, flipped=self._overruled(draft)
+        )
+        return self._to_report(draft)
+
+    def _screen_ruling(self, ruling: Ruling) -> tuple[dict[str, Any] | None, list[str]]:
+        """Show each check's observed values from the ledger and say what the ruling gets wrong.
+
+        An observed fact must name an object the runtime returned and fields it
+        holds, as a `seen` source does (ADR 0026). A check marked `confirms` or
+        `refutes` without such a fact reads as `not_observed`; a check left
+        out reads as `not_observed` too. The verdict must be one the report
+        tool allows. Code never weighs the results against the verdict (ADR 0017).
+
+        Returns:
+            The ruling as the report and the trace get it, or `None` when its
+            verdict is not one the report tool allows, and one sentence per
+            problem.
+        """
+        problems: list[str] = []
+        record_checks = {
+            check["n"]: check for check in (self._challenge_record or {}).get("checks", [])
+        }
+        ruled: dict[int, dict[str, Any]] = {}
+        for check in ruling.checks:
+            number = check.n
+            if number not in record_checks or number in ruled:
+                problems.append(f"Check {number} is not one of your checks or is answered twice.")
+                continue
+            observed: list[dict[str, Any]] = []
+            for fact in check.observed:
+                if fact.evidence_id not in self._ledger.objects:
+                    problems.append(
+                        f"Check {number} cites {fact.evidence_id!r}, which is not in the evidence."
+                    )
+                    continue
+                values = self._ledger.property_values(fact.evidence_id, fact.property_fields)
+                if missing := [name for name in fact.property_fields if name not in values]:
+                    problems.append(
+                        f"Check {number}: {fact.evidence_id!r} has no property field {missing}."
+                    )
+                if values:
+                    observed.append({"evidence_id": fact.evidence_id, "values": values})
+            result = check.result
+            if result != "not_observed" and not observed:
+                problems.append(
+                    f"Check {number} is marked {result!r} but cites no value the evidence shows: "
+                    "cite the ids and property fields that hold it, or mark it not_observed."
+                )
+                result = "not_observed"
+            ruled[number] = {
+                "n": number,
+                "look_for": record_checks[number]["look_for"],
+                "result": result,
+                "observed": observed,
+                "why": check.why,
+            }
+        for number, check in record_checks.items():
+            if number not in ruled:
+                problems.append(f"Check {number} is not answered.")
+                ruled[number] = {
+                    "n": number,
+                    "look_for": check["look_for"],
+                    "result": "not_observed",
+                    "observed": [],
+                    "why": "Not answered.",
+                }
+        verdicts = {verdict.lower(): verdict for verdict in self.catalog.verdicts()}
+        verdict = verdicts.get(ruling.verdict.strip().lower())
+        if verdict is None:
+            problems.append(f"The verdict must be one of {list(verdicts.values())}.")
+            return None, problems
+        checks = [ruled[number] for number in sorted(ruled)]
+        return {"verdict": verdict, "checks": checks, "reasoning": ruling.reasoning}, problems
 
     def _reporter_request(self, draft: dict[str, Any]) -> list[dict[str, Any]]:
         """Build the reporter's request: the alert, the evidence, the draft and any challenge."""
@@ -437,11 +805,14 @@ class Investigation:
         }
         if open_items := self._ledger.summary():
             request["still_open"] = open_items
+        verdict = self._ruled_verdict or report_verdict(draft)
+        spelled = {name.lower(): name for name in self.catalog.verdicts()}
+        request["verdict"] = spelled.get(verdict or "", verdict)
         request["draft_report"] = draft
         if self._challenge_record is not None:
-            request["challenge"] = dict(self._challenge_record)
-            if self._challenge_answers:
-                request["challenge"]["answers"] = self._challenge_answers
+            request["challenge"] = self._challenge_record
+        if self._ruled_verdict is not None:
+            request["ruling"] = self.ruling
         return [
             {"role": "system", "content": REPORTER_PROMPT},
             {"role": "user", "content": render_json(request)},
@@ -494,9 +865,12 @@ class Investigation:
             return Review(
                 review.role, draft, messages, review.response_format, review.model, repaired=True
             )
-        logger.warning("Sending the investigation's own report: {}", problem)
         self.trace.report_written(draft, None, problem)
         self._rewritten, self.report_fallback = False, problem
+        if self._overruled(draft):
+            # The draft argues the overruled verdict, so it is no fallback here.
+            return self._hand_back(draft)
+        logger.warning("Sending the investigation's own report: {}", problem)
         return Send(draft)
 
     def _checked_report(
@@ -515,8 +889,9 @@ class Investigation:
             report = self.catalog.prepare(FINISH_TOOL, reply.arguments)
         except ValueError as exc:
             return None, str(exc)
-        if report_verdict(report) != report_verdict(draft):
-            return None, f"the verdict must stay {report_verdict(draft)!r}."
+        verdict = self._ruled_verdict or report_verdict(draft)
+        if report_verdict(report) != verdict:
+            return None, f"the verdict must stay {verdict!r}."
         if (empty := report_problem(report)) is not None:
             return None, empty
         decision = self._ledger.check(FINISH_TOOL, report)
@@ -571,7 +946,10 @@ class Investigation:
             self._challenge_record = {"hypothesis": hypothesis, "checks": checks}
             feedback: dict[str, Any] = {
                 "status": "error",
-                "message": f"Not sent to the runtime: {CHALLENGE_ANSWER}",
+                "message": "Not sent to the runtime: "
+                + CHALLENGE_ANSWER.format(
+                    who_decides=RULING_DECIDES if self._ruling_enabled else HEAD_DECIDES
+                ),
                 "challenge": self._challenge_record,
             }
         else:
@@ -654,22 +1032,34 @@ class Investigation:
             checks.append({"n": len(checks) + 1, **item})
         return checks, problems
 
-    def after_call(self, tool: str, arguments: dict[str, Any], outcome: ToolOutcome) -> Reply:
+    def after_call(
+        self,
+        tool: str,
+        arguments: dict[str, Any],
+        outcome: ToolOutcome,
+        *,
+        alert_stage: bool = False,
+    ) -> Reply:
         """Learn from a runtime answer and build the message the model sees.
 
         The message carries the evidence, then `still_open` for what is known
-        but not yet visited. The ledger caches the evidence alone.
+        but not yet visited. The ledger caches the evidence alone. An alert
+        stage answer carries the evidence only: `alert_stage_summary` gives
+        `still_open` once, after the whole stage.
 
         Args:
             tool: Tool that was called.
             arguments: Arguments sent to the runtime, as `before_call` returned them.
             outcome: The runtime's answer to a non-terminal call.
+            alert_stage: Whether the alert stage made the call.
 
         Returns:
             The tool message content.
         """
         self._ledger.record(tool, arguments, outcome)
         feedback = outcome.evidence()
+        if alert_stage:
+            return Reply(feedback)
         if tool == FINISH_TOOL and self._rewritten:
             # The model's history shows its own draft; the answer is about this report.
             feedback["sent_report"] = arguments

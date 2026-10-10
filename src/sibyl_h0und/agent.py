@@ -1,5 +1,6 @@
 import time
 from pathlib import Path
+from textwrap import indent
 from typing import Any
 
 from loguru import logger
@@ -13,7 +14,13 @@ from bluesec1_client import (
 )
 from sibyl_h0und.budget import DEFAULT_MAX_RUNTIME_CALLS, CallBudget
 from sibyl_h0und.catalog import FINISH_TOOL
-from sibyl_h0und.investigation import Investigation, LocalAnswer, Review, Send
+from sibyl_h0und.investigation import (
+    TACTIC_CHECKS,
+    Investigation,
+    LocalAnswer,
+    Review,
+    Send,
+)
 from sibyl_h0und.llm import StructuredStepClient, render_json
 from sibyl_h0und.outcome import ToolOutcome
 from sibyl_h0und.trace import TaskTrace, elapsed_ms, run_trace_dir, task_trace_path
@@ -59,8 +66,8 @@ Stance:
 
 Method. Work through these phases. Keep `current_state` on the current phase, the open
 hypotheses and the evidence for and against each.
-1. Orient. Read the alert and open the entities it names, starting with the process
-   that triggered it.
+1. Orient. Read the alert and what the calls before your first turn show about the
+   entities it names and their relations; open what they left open.
 2. Map. Follow what the trigger did: child processes, scripts and commands, file writes
    and deletes, registry, service and task changes, network connections in either
    direction. Follow what led to it: the parent process, the user and logon, the job,
@@ -76,10 +83,10 @@ hypotheses and the evidence for and against each.
    share one type, count that type with one page as `still_open` advises instead of
    paging through it, then look for the relations of other types it leaves.
 3. Place it on the kill chain, with MITRE ATT&CK as the map. For each notable action,
-   name the tactic and technique it would be if hostile. An alert is one stage of a
-   longer chain, so always look one stage back and one stage forward, whatever the
-   verdict seems to be. That usually takes two to four calls, more when the chain goes
-   on, and is worth them.
+   name the tactic and technique it would be if hostile, and answer that tactic's check
+   below from the evidence. An alert is one stage of a longer chain, so always look one
+   stage back and one stage forward, whatever the verdict seems to be. That usually
+   takes two to four calls, more when the chain goes on, and is worth them.
    - Back: how did it start? Initial access, delivery or execution: the parent chain,
      the logon and its source host, the email, download, share, service or task that
      launched it, an inbound connection.
@@ -90,15 +97,20 @@ hypotheses and the evidence for and against each.
    and what it did. A busy program (a browser, a shell, an agent) can hide one hostile
    action among many ordinary ones: look at the kinds of actions it took, not only the
    first few.
+{indent(TACTIC_CHECKS, "   ")}
 4. Test. For each hypothesis, say what would confirm or refute it, check it against the
    knowledge vocabulary and fetch that evidence from the graph.
 5. Decide. Before a benign verdict you must have looked one stage back and one stage
    forward (phase 3), opened every kind of outgoing relation of the trigger process at
    least once, and opened the entity that explains its legitimacy (the account, the
    logon or the parent job); you must also be able to say why the detection fired and
-   why that is not an attack here. Before a malicious verdict you must be able to name
-   the techniques and the entities that carried them out. In both cases, state the
-   strongest case for the opposite verdict and why the evidence rejects it.
+   why that is not an attack here. For each tactic the activity plausibly belongs to
+   (the alert's own and the stages one back and one forward), the tactic check must be
+   answered from the evidence at its place to look; its "not an answer" reading does
+   not count.
+   Before a malicious verdict you must be able to name the techniques and the entities
+   that carried them out. In both cases, state the strongest case for the opposite
+   verdict and why the evidence rejects it.
 6. Report with `{FINISH_TOOL}`.
 
 Impact and business activity:
@@ -158,6 +170,37 @@ Mechanics:
 - When told that only `{FINISH_TOOL}` remains, submit the verdict at once from the
   evidence already gathered.
 """.strip()
+
+
+def assistant_call(
+    tool_call_id: str, content: str, tool: str, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    """Build the history message of one tool call."""
+    return {
+        "role": "assistant",
+        "content": content,
+        "tool_calls": [
+            {
+                "type": "function",
+                "id": tool_call_id,
+                "function": {"name": tool, "arguments": render_json(arguments)},
+            }
+        ],
+    }
+
+
+def tool_message(tool_call_id: str, feedback: dict[str, Any]) -> dict[str, Any]:
+    """Build the history message that answers one tool call."""
+    return {"role": "tool", "content": render_json(feedback), "tool_call_id": tool_call_id}
+
+
+def decode(response: ToolCallResult) -> ToolOutcome:
+    """Decode a runtime response once, as replay decodes a recorded one."""
+    return ToolOutcome.from_wire(
+        info=response.info,
+        observation=response.observation,
+        terminal=response.task_result is not None,
+    )
 
 
 async def run_review(
@@ -238,6 +281,8 @@ class SimpleSGRAgent:
         max_runtime_calls: int = DEFAULT_MAX_RUNTIME_CALLS,
         trace_dir: Path | None = None,
         trace_metadata: dict[str, Any] | None = None,
+        challenger_ruling: bool = True,
+        alert_stage: bool = True,
     ) -> None:
         """Store the LLM dependency and the per-task safety ceiling.
 
@@ -247,6 +292,10 @@ class SimpleSGRAgent:
                 included. It must stay below the runtime's own limit of 100.
             trace_dir: Root directory for run traces, or `None` to disable tracing.
             trace_metadata: Non-secret run settings stored in every `task_start` event.
+            challenger_ruling: Whether the challenger rules on the benign verdict
+                after its checks (ADR 0028).
+            alert_stage: Whether the alert stage opens the alert's entities
+                before the first turn (ADR 0029).
 
         Raises:
             ValueError: If the ceiling leaves no room below the runtime's limit.
@@ -256,6 +305,8 @@ class SimpleSGRAgent:
         self.max_runtime_calls = max_runtime_calls
         self.trace_dir = trace_dir
         self.trace_metadata = dict(trace_metadata or {})
+        self.challenger_ruling = challenger_ruling
+        self.alert_stage = alert_stage
 
     async def run(self, client: RemoteBenchmarkClient) -> AgentRunResult:
         """Consume the remote queue and aggregate authoritative task results.
@@ -328,7 +379,9 @@ class SimpleSGRAgent:
             CallBudgetExhaustedError: If no report is accepted within the safety limits.
         """
         trace = trace or TaskTrace(None)
-        investigation = Investigation(session.task.observation, trace)
+        investigation = Investigation(
+            session.task.observation, trace, ruling=self.challenger_ruling
+        )
         trace.task_start(
             self.trace_metadata,
             session.task.model_dump(mode="json"),
@@ -339,6 +392,31 @@ class SimpleSGRAgent:
             {"role": "system", "content": SYSTEM_PROMPT},
             investigation.opening_message(),
         ]
+
+        # The alert stage (ADR 0029): the alert's entities and their relations,
+        # opened before the first turn and shown as ordinary evidence.
+        stage_calls = 0
+        outcome: ToolOutcome | None = None
+        while (
+            self.alert_stage
+            and budget.leaves_room()
+            and (call := investigation.alert_stage_call(outcome))
+        ):
+            stage_calls += 1
+            tool_call_id = f"alert_stage_{stage_calls}"
+            messages.append(assistant_call(tool_call_id, "Alert stage.", call.tool, call.arguments))
+            budget.record_runtime_call()
+            response = await self._call_tool(
+                session, trace, call.tool, call.arguments, alert_stage=True
+            )
+            if response.task_result is not None:
+                return TaskResult.model_validate(response.task_result)
+            outcome = decode(response)
+            reply = investigation.after_call(call.tool, call.arguments, outcome, alert_stage=True)
+            messages.append(tool_message(tool_call_id, reply.feedback))
+        if stage_calls:
+            logger.info("The alert stage made {} runtime calls.", stage_calls)
+            messages.append(investigation.alert_stage_summary())
 
         while True:
             step_number = trace.next_step()
@@ -366,27 +444,16 @@ class SimpleSGRAgent:
             trace.step_chosen(tool_name, step.model_dump(mode="json"))
             tool_call_id = f"step_{step_number}"
             messages.append(
-                {
-                    "role": "assistant",
-                    "content": step.plan_remaining_steps_brief[0],
-                    "tool_calls": [
-                        {
-                            "type": "function",
-                            "id": tool_call_id,
-                            "function": {
-                                "name": tool_name,
-                                "arguments": render_json(step.function.arguments),
-                            },
-                        }
-                    ],
-                }
+                assistant_call(
+                    tool_call_id,
+                    step.plan_remaining_steps_brief[0],
+                    tool_name,
+                    step.function.arguments,
+                )
             )
 
             decision = investigation.before_call(
-                tool_name,
-                step.function.arguments,
-                finish_only=finish_only,
-                state=step.current_state,
+                tool_name, step.function.arguments, finish_only=finish_only
             )
             decision = await settle(self.llm, investigation, decision, trace)
             if isinstance(decision, LocalAnswer):
@@ -395,23 +462,13 @@ class SimpleSGRAgent:
             else:
                 budget.record_runtime_call()
                 response = await self._call_tool(session, trace, tool_name, decision.arguments)
-                outcome = ToolOutcome.from_wire(
-                    info=response.info,
-                    observation=response.observation,
-                    terminal=response.task_result is not None,
-                )
+                outcome = decode(response)
                 logger.info("Tool {} returned status {}.", tool_name, outcome.status)
                 if response.task_result is not None:
                     return TaskResult.model_validate(response.task_result)
                 feedback = investigation.after_call(tool_name, decision.arguments, outcome).feedback
 
-            messages.append(
-                {
-                    "role": "tool",
-                    "content": render_json(feedback),
-                    "tool_call_id": tool_call_id,
-                }
-            )
+            messages.append(tool_message(tool_call_id, feedback))
 
     @staticmethod
     async def _call_tool(
@@ -419,6 +476,8 @@ class SimpleSGRAgent:
         trace: TaskTrace,
         tool_name: str,
         arguments: dict[str, Any],
+        *,
+        alert_stage: bool = False,
     ) -> ToolCallResult:
         """Invoke one runtime tool and trace the exact request and full response.
 
@@ -427,6 +486,7 @@ class SimpleSGRAgent:
             trace: Task trace of this session.
             tool_name: Advertised tool name.
             arguments: Tool arguments sent to the runtime.
+            alert_stage: Whether the alert stage made the call, not the model.
 
         Returns:
             Server tool-call response.
@@ -435,6 +495,10 @@ class SimpleSGRAgent:
         started_at = time.perf_counter()
         response = await session.call_tool(tool_name, arguments)
         trace.tool_call(
-            tool_name, arguments, response.model_dump(mode="json"), elapsed_ms(started_at)
+            tool_name,
+            arguments,
+            response.model_dump(mode="json"),
+            elapsed_ms(started_at),
+            alert_stage=alert_stage,
         )
         return response

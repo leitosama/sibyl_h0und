@@ -1,6 +1,6 @@
 # 0022. Benign-вердикт оспаривает челленджер на дайджесте улик
 
-- Статус: Принято
+- Статус: Принято; кто решает после челленджа — заменено [0028](0028-challenger-rules-the-verdict.md)
 - Дата: 2026-10-09
 - Источник: [issue #45](https://github.com/leitosama/sibyl_h0und/issues/45), дизайн [finish-gate.md](../finish-gate.md); развивает [0020](0020-alert-presumed-malicious.md), дополняет [0007](0007-compact-llm-context.md)
 

@@ -15,9 +15,10 @@ attack_techniques.json, attack_software.json, attack_software_names.json
   Licence: MITRE ATT&CK Terms of Use, https://attack.mitre.org/resources/terms-of-use/
   Notice: (c) 2015-2026 The MITRE Corporation. This work is reproduced and
   distributed with the permission of The MITRE Corporation.
-  Use: ids, names, tactics, platforms, the opening of each description, software
-  names and aliases, and the technique ids each software uses, reduced by
-  scripts/build_attack_pack.py.
+  Use: ids, names, tactics, platforms, the opening of each description, the
+  names of the data components each technique's detection analytics read by platform,
+  software names and aliases, and the technique ids each software uses, reduced
+  by scripts/build_attack_pack.py.
 
 lolrmm.json, lolrmm_domains.json
   Source: LOLRMM, https://lolrmm.io/
