@@ -88,6 +88,10 @@ class CallBudget:
             )
         return True
 
+    def leaves_room(self) -> bool:
+        """Tell whether one more investigation call still leaves room for the report."""
+        return self.finish_reason is None and self.runtime_calls < self.max_runtime_calls - 1
+
     def record_runtime_call(self) -> None:
         """Count a call that reached the runtime."""
         self.runtime_calls += 1
