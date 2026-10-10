@@ -253,11 +253,15 @@ CHALLENGE_ANSWER = (
     "(`look_for`), what confirms the attack and what refutes it. `seen` points at evidence "
     "you already have and shows its values; `call` would show a fact not seen yet (a "
     "repeated call returns its earlier result). `still_open` lists what is known but "
-    "unvisited. The reviewer rules on the verdict from the evidence, not from your reading "
-    "of it: your job now is to put each deciding fact in the evidence. Make the calls the "
-    "checks need, follow what they show one stage further, then submit the report again, "
-    "malicious or benign as the evidence says."
+    "unvisited. {who_decides} Make the calls the checks need, follow what they show one "
+    "stage further, then submit the report again, malicious or benign as the evidence says."
 )
+# Who decides the verdict after the challenge, as the head is told it.
+RULING_DECIDES = (
+    "The reviewer rules on the verdict from the evidence, not from your reading of it: your "
+    "job now is to put each deciding fact in the evidence."
+)
+HEAD_DECIDES = "Your verdict must rest on the deciding facts, so put each of them in the evidence."
 # What the challenger is told once when its ruling cites what the evidence does not hold.
 RULING_REPAIR = (
     "The ruling needs a fix: {problems} Return the whole ruling again as one JSON object "
@@ -332,12 +336,20 @@ class Reply:
 class Investigation:
     """Per-task state and rules that turn tool calls and responses into messages."""
 
-    def __init__(self, observation: dict[str, Any], trace: TaskTrace | None = None) -> None:
+    def __init__(
+        self,
+        observation: dict[str, Any],
+        trace: TaskTrace | None = None,
+        *,
+        ruling: bool = True,
+    ) -> None:
         """Build the catalog, ledger and knowledge vocabulary of one task.
 
         Args:
             observation: Public task observation with a JSON-encoded `available_tools`.
             trace: Task trace that receives the events of local decisions.
+            ruling: Whether the challenger rules on the report after its checks
+                (ADR 0028); off, the head's verdict stands as before.
 
         Raises:
             ValueError: If the observation has an invalid tool catalog.
@@ -362,6 +374,7 @@ class Investigation:
         # Each object as the challenger saw it, to show the ruling only what changed.
         self._challenged_objects: dict[str, str] = {}
         self._judged = False
+        self._ruling_enabled = ruling
         # The challenger's ruling: its reading of each check and the verdict, or `None`.
         self.ruling: dict[str, Any] | None = None
         # Why the challenger gave no usable ruling, or `None`.
@@ -629,7 +642,7 @@ class Investigation:
             # A failed repair does not cost the checks the first reply got right.
             hypothesis, checks = self._unrepaired
         answer = self._challenge(review.arguments, hypothesis, checks, error)
-        if self._challenge_record is not None:
+        if self._challenge_record is not None and self._ruling_enabled:
             # The ruling continues this conversation from the case the head was given.
             self._judge_opening = [
                 *review.messages[:2],
@@ -933,7 +946,10 @@ class Investigation:
             self._challenge_record = {"hypothesis": hypothesis, "checks": checks}
             feedback: dict[str, Any] = {
                 "status": "error",
-                "message": f"Not sent to the runtime: {CHALLENGE_ANSWER}",
+                "message": "Not sent to the runtime: "
+                + CHALLENGE_ANSWER.format(
+                    who_decides=RULING_DECIDES if self._ruling_enabled else HEAD_DECIDES
+                ),
                 "challenge": self._challenge_record,
             }
         else:

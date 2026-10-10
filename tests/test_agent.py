@@ -306,6 +306,19 @@ def test_agent_executes_fresh_structured_task_via_remote_session(tmp_path: Path)
     assert events[-1]["runtime_calls"] == 2
 
 
+def test_the_alert_stage_switched_off_leaves_the_first_calls_to_the_model() -> None:
+    """With the kill switch off, nothing reaches the runtime before the model's first turn."""
+    llm = FakeStepClient(investigation_steps())
+    session = FakeSession()
+    agent = SimpleSGRAgent(llm, alert_stage=False)
+
+    asyncio.run(agent.run(cast(RemoteBenchmarkClient, FakeClient(session))))
+
+    assert len(llm.requests[0]) == 2
+    assert [name for name, _ in session.calls] == ["get_entity", "finish_investigation"]
+    assert "note" not in json.loads(llm.requests[1][-1]["content"])
+
+
 def test_trace_write_failure_does_not_break_the_run(tmp_path: Path) -> None:
     """An unwritable trace root must not stop an arena run."""
     blocker = tmp_path / "not-a-directory"

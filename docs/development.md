@@ -15,6 +15,12 @@ cp .env.example .env.h0und1   # токен для зачёта,     AGENT_NAME=h
 Необязательный `LLM_CHALLENGER_MODEL` даёт челленджеру свою модель того же
 провайдера (ADR 0025). Все `.env*`, кроме `.env.example`, игнорируются git'ом.
 
+Выключатели последних изменений, оба включены по умолчанию: `AGENT_CHALLENGER_RULING=false`
+возвращает вердикт после челленджа голове (без постановления,
+[ADR 0028](adr/0028-challenger-rules-the-verdict.md)), `AGENT_ALERT_STAGE=false` убирает
+этап алерта ([ADR 0029](adr/0029-alert-stage-opens-alert-entities.md)). Значения
+пишутся в метаданные run'а.
+
 Запуск:
 
 ```bash

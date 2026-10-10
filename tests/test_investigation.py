@@ -497,6 +497,25 @@ def test_a_ruling_on_a_value_the_evidence_lacks_is_repaired_once_then_read_as_un
     assert (check["result"], check["observed"]) == ("not_observed", [])
 
 
+def test_with_the_ruling_switched_off_the_head_decides_after_the_challenge() -> None:
+    """With the kill switch off, the head is told its verdict rests on the facts, and its
+    next report goes to the reporter with its own verdict, as before ADR 0028."""
+    investigation = Investigation(observation(), ruling=False)
+    sent = investigation.before_call("get_entity", get_entity())
+    assert isinstance(sent, Send)
+    investigation.after_call("get_entity", sent.arguments, ToolOutcome("ok", DROPPED_FILE))
+    challenger = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
+    assert isinstance(challenger, Review)
+
+    answer = investigation.after_review(challenger, challenge(seen("file-1", "path")))
+    reporter = investigation.before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
+
+    assert isinstance(answer, LocalAnswer)
+    assert "Your verdict must rest on the deciding facts" in answer.feedback["message"]
+    assert "reviewer rules" not in answer.feedback["message"]
+    assert to_reporter(reporter) == {"submission": BENIGN_REPORT}
+
+
 def test_without_a_ruling_the_report_keeps_its_own_verdict() -> None:
     """The run never depends on the ruling turn: the head's draft goes to the reporter."""
     investigation, _, judge = to_ruling()

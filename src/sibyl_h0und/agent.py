@@ -281,6 +281,8 @@ class SimpleSGRAgent:
         max_runtime_calls: int = DEFAULT_MAX_RUNTIME_CALLS,
         trace_dir: Path | None = None,
         trace_metadata: dict[str, Any] | None = None,
+        challenger_ruling: bool = True,
+        alert_stage: bool = True,
     ) -> None:
         """Store the LLM dependency and the per-task safety ceiling.
 
@@ -290,6 +292,10 @@ class SimpleSGRAgent:
                 included. It must stay below the runtime's own limit of 100.
             trace_dir: Root directory for run traces, or `None` to disable tracing.
             trace_metadata: Non-secret run settings stored in every `task_start` event.
+            challenger_ruling: Whether the challenger rules on the benign verdict
+                after its checks (ADR 0028).
+            alert_stage: Whether the alert stage opens the alert's entities
+                before the first turn (ADR 0029).
 
         Raises:
             ValueError: If the ceiling leaves no room below the runtime's limit.
@@ -299,6 +305,8 @@ class SimpleSGRAgent:
         self.max_runtime_calls = max_runtime_calls
         self.trace_dir = trace_dir
         self.trace_metadata = dict(trace_metadata or {})
+        self.challenger_ruling = challenger_ruling
+        self.alert_stage = alert_stage
 
     async def run(self, client: RemoteBenchmarkClient) -> AgentRunResult:
         """Consume the remote queue and aggregate authoritative task results.
@@ -371,7 +379,9 @@ class SimpleSGRAgent:
             CallBudgetExhaustedError: If no report is accepted within the safety limits.
         """
         trace = trace or TaskTrace(None)
-        investigation = Investigation(session.task.observation, trace)
+        investigation = Investigation(
+            session.task.observation, trace, ruling=self.challenger_ruling
+        )
         trace.task_start(
             self.trace_metadata,
             session.task.model_dump(mode="json"),
@@ -387,7 +397,11 @@ class SimpleSGRAgent:
         # opened before the first turn and shown as ordinary evidence.
         stage_calls = 0
         outcome: ToolOutcome | None = None
-        while budget.leaves_room() and (call := investigation.alert_stage_call(outcome)):
+        while (
+            self.alert_stage
+            and budget.leaves_room()
+            and (call := investigation.alert_stage_call(outcome))
+        ):
             stage_calls += 1
             tool_call_id = f"alert_stage_{stage_calls}"
             messages.append(assistant_call(tool_call_id, "Alert stage.", call.tool, call.arguments))
