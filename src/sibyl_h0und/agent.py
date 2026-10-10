@@ -104,8 +104,10 @@ hypotheses and the evidence for and against each.
    forward (phase 3), opened every kind of outgoing relation of the trigger process at
    least once, and opened the entity that explains its legitimacy (the account, the
    logon or the parent job); you must also be able to say why the detection fired and
-   why that is not an attack here. For every tactic the activity could belong to, the
-   answer to its check (phase 3) must be a positive explanation from the evidence.
+   why that is not an attack here. For each tactic the activity plausibly belongs to
+   (the alert's own and the stages one back and one forward), the tactic check must be
+   answered from the evidence at its place to look; its "not an answer" reading does
+   not count.
    Before a malicious verdict you must be able to name the techniques and the entities
    that carried them out. In both cases, state the strongest case for the opposite
    verdict and why the evidence rejects it.

@@ -51,57 +51,61 @@ BENIGN_CHALLENGE = (
     "before submitting. Answer from the evidence: why did the detection fire? What came "
     "one stage before the trigger on the kill chain (how it started: parent, logon and "
     "its source, delivery) and one stage after (what it led to: children, written or "
-    "changed files, persistence, connections and the hosts they reach)? If a stage is "
-    "not opened yet (`still_open` lists what is known but unvisited), open it; do not "
+    "changed files, persistence, connections and the hosts they reach)? Answer the "
+    "tactic check of each tactic involved from the evidence at its place to look. If a "
+    "stage is not opened yet (`still_open` lists what is known but unvisited), open it; do not "
     "repeat calls. If the evidence already answers all of this, submit the report "
     "again, malicious or benign as the evidence says."
 )
 # One basic question per ATT&CK tactic, where its answer lies in the graph and
-# why the activity can still look normal. The head and the challenger share it,
-# so a benign verdict and the case against it ask the same questions. Authored
-# guidance, not source data, so it stays out of the knowledge packs (ADR 0017);
-# general principles only: no technique id, program, port, relation type or
-# scenario of a practice task. Tactic names follow the ATT&CK pack.
+# the normal-looking reading that does not answer it. The head and the
+# challenger share it, so a benign verdict and the case against it ask the same
+# questions. Authored guidance, not source data, so it stays out of the
+# knowledge packs (ADR 0017). General wording: no technique id, program, port or
+# relation type. Tactic names follow the ATT&CK pack.
 TACTIC_CHECKS = """
-Tactic checks: the question; where to look; why it can look normal.
+Tactic checks. Each gives the question, where in the evidence to look and, after
+"not an answer", the reading that makes the activity look normal without answering
+the question. ATT&CK splits defense evasion into stealth and defense-impairment.
 - initial-access: how did the actor first arrive? The session's first logon or
   inbound connection; what delivered the first process (mail, download, removable
-  media, remote service). A valid account, a user opening a file.
+  media, remote service). Not an answer: a valid account, a user opening a file.
 - execution: what ran, started by whom, with what content? The process creation
   chain, command and script text, the task, service or management agent that launched
-  it. An interpreter run by an admin tool.
+  it. Not an answer: an interpreter run by an admin tool.
 - persistence: will it come back? Services, tasks, autostart entries and accounts
-  created or changed: who made them, what they point to. An installer or management
-  tool.
+  created or changed: who made them, what they point to. Not an answer: an installer
+  or management tool made it.
 - privilege-escalation: did it end with more rights than it started with? User or
   integrity change from parent to child, new group membership, SYSTEM running a file
-  a user wrote. Services run as SYSTEM anyway.
+  a user wrote. Not an answer: services run as SYSTEM anyway.
 - stealth: is something pretending to be something else? Name, path, signature and
-  parent against what the binary claims to be; injected threads; hidden files. A
-  signed name in a standard path.
+  parent against what the binary claims to be, injected threads, hidden files. Not an
+  answer: a signed name in a standard path.
 - defense-impairment: was protection or visibility reduced? Stopped or deleted
-  services, disabled agents, cleared or changed logs, firewall changes. Maintenance.
+  services, disabled agents, cleared or changed logs, firewall changes. Not an
+  answer: maintenance.
 - credential-access: did anything touch secrets? Access to the process that holds
   credentials, reads of credential files or hives, directory replication requests,
-  bursts of failed logons. A security agent doing it.
+  bursts of failed logons. Not an answer: a security agent did it.
 - discovery: did something enumerate the environment? Bursts of short queries about
-  users, groups, hosts, shares, the domain. An admin console.
+  users, groups, hosts, shares, the domain. Not an answer: an admin console.
 - lateral-movement: did the actor reach another host, and what did it do there? The
   logon's source host and type, remote service or task creation, inbound connections
-  to system processes; the source's activity before, the target's after. A valid
-  account from an internal host.
+  to system processes, the source's activity before and the target's after. Not an
+  answer: a valid account from an internal host.
 - collection: was data gathered? Many reads of documents or a database, archives,
-  staging folders. Backup, export.
+  staging folders. Not an answer: backup, export.
 - command-and-control: is a remote party steering it? Repeated connections to one
   destination over time, a process that should not talk out, one rare destination
-  among many, tunnels and listeners. A busy browser or agent.
+  among many, tunnels and listeners. Not an answer: a busy browser or agent.
 - exfiltration: did data leave? A staged or archived file followed by an outbound
-  transfer, its volume, sync or cloud destinations. Cloud sync.
+  transfer, its volume, sync or cloud destinations. Not an answer: cloud sync.
 - impact: was data, a service or availability changed? Writes to business data
-  (database updates, files rewritten in place), deleted backups, mass renames,
-  stopped services. An admin script.
-Looking normal answers none of these questions; only the evidence at the place to
-look does.
+  (records changed, files rewritten in place), deleted backups, mass renames, stopped
+  services. Not an answer: an admin script.
+An answer is what the evidence at the place to look shows: what happened and why it
+is or is not hostile. "Nothing seen" there answers only if that place was opened.
 """.strip()
 CHALLENGER_ROLE = "challenger"
 # The challenger argues the opposite of a benign verdict from the evidence
@@ -133,9 +137,9 @@ Your job is to argue the opposite verdict.
 - Judge what each entity did, to what and from where, not what it is called. A familiar
   name, a signature, a usual parent or a plausible purpose does not refute an attack.
   An entity with many relations of which few were opened is a place an attack can hide.
-- Place the case on the tactics below. For each tactic the evidence could belong to, its
-  question is what a check decides, its place to look is where the fact lies, and why it
-  can look normal is the innocent reading the check must rule in or out.
+- Place the case on the tactics below and pick the one to three whose questions it rests
+  on. A check decides one such question: its place to look is where the fact lies, and its
+  "not an answer" reading is the innocent one the check must rule out or confirm.
 - Always argue the attack, even when the evidence looks clean and your case is weak. A weak
   case is still worth making when its checks open what nobody has looked at.
 - The investigation then works on your checks, and you rule on the verdict from what they
@@ -167,9 +171,10 @@ still unvisited.
 - Then rule on the whole alert. A detection fired on this activity. Benign needs evidence
   that positively explains it: who did it, under which account and logon, started by what,
   and why that fits; a check that confirms the attack stands against it, and a check left
-  `not_observed` is an open question, not a refutation. Malicious needs the facts that make
-  it an attack, not a suspicion alone. A familiar name, a signature, a usual parent or a
-  plausible purpose decides neither way.
+  `not_observed` is an open question, not a refutation. A reading the tactic checks call
+  "not an answer" refutes nothing, and "nothing seen" counts only where that place was
+  opened. Malicious needs the facts that make it an attack, not a suspicion alone. A
+  familiar name, a signature, a usual parent or a plausible purpose decides neither way.
 - `reasoning` names the few facts the verdict rests on.
 
 Return exactly one JSON object matching the supplied schema, with no prose.
