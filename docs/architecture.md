@@ -34,7 +34,7 @@ src/sibyl_h0und/
   cli.py                       точка входа h0und: настройки, run, печать итогов
   settings.py                  настройки из окружения / .env
   agent.py                     SimpleSGRAgent: цикл «одно действие за ход», SYSTEM_PROMPT
-  investigation.py             Investigation: before_call / after_call / after_review одной задачи (ADR 0016), промпты челленджера, его постановления и репортёра
+  investigation.py             Investigation: before_call / after_call / after_review одной задачи (ADR 0016), промпты челленджера, его постановления и репортёра, общие с головой проверки по тактикам `TACTIC_CHECKS`
   digest.py                    дайджест улик из GraphLedger для побочных ходов (ADR 0022)
   outcome.py                   ToolOutcome: ответ runtime, разобранный один раз
   llm.py                       клиент OpenAI-совместимого API со structured output

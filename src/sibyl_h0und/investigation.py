@@ -56,11 +56,58 @@ BENIGN_CHALLENGE = (
     "repeat calls. If the evidence already answers all of this, submit the report "
     "again, malicious or benign as the evidence says."
 )
+# One basic question per ATT&CK tactic, where its answer lies in the graph and
+# why the activity can still look normal. The head and the challenger share it,
+# so a benign verdict and the case against it ask the same questions. Authored
+# guidance, not source data, so it stays out of the knowledge packs (ADR 0017);
+# general principles only: no technique id, program, port, relation type or
+# scenario of a practice task. Tactic names follow the ATT&CK pack.
+TACTIC_CHECKS = """
+Tactic checks: the question; where to look; why it can look normal.
+- initial-access: how did the actor first arrive? The session's first logon or
+  inbound connection; what delivered the first process (mail, download, removable
+  media, remote service). A valid account, a user opening a file.
+- execution: what ran, started by whom, with what content? The process creation
+  chain, command and script text, the task, service or management agent that launched
+  it. An interpreter run by an admin tool.
+- persistence: will it come back? Services, tasks, autostart entries and accounts
+  created or changed: who made them, what they point to. An installer or management
+  tool.
+- privilege-escalation: did it end with more rights than it started with? User or
+  integrity change from parent to child, new group membership, SYSTEM running a file
+  a user wrote. Services run as SYSTEM anyway.
+- stealth: is something pretending to be something else? Name, path, signature and
+  parent against what the binary claims to be; injected threads; hidden files. A
+  signed name in a standard path.
+- defense-impairment: was protection or visibility reduced? Stopped or deleted
+  services, disabled agents, cleared or changed logs, firewall changes. Maintenance.
+- credential-access: did anything touch secrets? Access to the process that holds
+  credentials, reads of credential files or hives, directory replication requests,
+  bursts of failed logons. A security agent doing it.
+- discovery: did something enumerate the environment? Bursts of short queries about
+  users, groups, hosts, shares, the domain. An admin console.
+- lateral-movement: did the actor reach another host, and what did it do there? The
+  logon's source host and type, remote service or task creation, inbound connections
+  to system processes; the source's activity before, the target's after. A valid
+  account from an internal host.
+- collection: was data gathered? Many reads of documents or a database, archives,
+  staging folders. Backup, export.
+- command-and-control: is a remote party steering it? Repeated connections to one
+  destination over time, a process that should not talk out, one rare destination
+  among many, tunnels and listeners. A busy browser or agent.
+- exfiltration: did data leave? A staged or archived file followed by an outbound
+  transfer, its volume, sync or cloud destinations. Cloud sync.
+- impact: was data, a service or availability changed? Writes to business data
+  (database updates, files rewritten in place), deleted backups, mass renames,
+  stopped services. An admin script.
+Looking normal answers none of these questions; only the evidence at the place to
+look does.
+""".strip()
 CHALLENGER_ROLE = "challenger"
 # The challenger argues the opposite of a benign verdict from the evidence
 # alone (ADR 0022). Written from general principles: no program, port,
 # relation type or scenario of any practice task.
-CHALLENGER_PROMPT = """
+CHALLENGER_PROMPT = f"""
 You are a threat hunter reviewing an investigation before it closes. A detection (a SIEM
 rule, an EDR or an antivirus) raised the alert, and the investigation is about to call it
 benign. You see the alert, the tools, every piece of evidence the investigation gathered
@@ -86,10 +133,15 @@ Your job is to argue the opposite verdict.
 - Judge what each entity did, to what and from where, not what it is called. A familiar
   name, a signature, a usual parent or a plausible purpose does not refute an attack.
   An entity with many relations of which few were opened is a place an attack can hide.
+- Place the case on the tactics below. For each tactic the evidence could belong to, its
+  question is what a check decides, its place to look is where the fact lies, and why it
+  can look normal is the innocent reading the check must rule in or out.
 - Always argue the attack, even when the evidence looks clean and your case is weak. A weak
   case is still worth making when its checks open what nobody has looked at.
 - The investigation then works on your checks, and you rule on the verdict from what they
   show. Write `confirms_if` and `refuted_if` as values you can tell apart then.
+
+{TACTIC_CHECKS}
 
 Evidence layout: `hosts` groups each host with the entities and relations nearest to it;
 `between_hosts` holds relations that join entities of different hosts; `no_host` holds

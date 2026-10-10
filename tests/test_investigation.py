@@ -1,11 +1,14 @@
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from sibyl_h0und.agent import SYSTEM_PROMPT
 from sibyl_h0und.catalog import FINISH_TOOL
 from sibyl_h0und.investigation import Investigation, LocalAnswer, Review, Send
+from sibyl_h0und.knowledge import load_pack
 from sibyl_h0und.models import Challenge, Ruling, ToolCall
 from sibyl_h0und.outcome import ToolOutcome
 from sibyl_h0und.trace import TaskTrace
@@ -255,6 +258,22 @@ def test_the_first_benign_report_goes_to_the_challenger_without_the_heads_reason
     schema = json.dumps(review.response_format)
     assert '"get_entity"' in schema
     assert FINISH_TOOL not in schema
+
+
+def test_the_head_and_the_challenger_ask_the_tactic_checks_of_the_attack_pack() -> None:
+    """Both sides of a benign verdict get one check per ATT&CK tactic from initial access to
+    impact, named as the pack names them, so a check's tactic is a term the vocabulary knows."""
+    review = fetched_file_investigation().before_call(FINISH_TOOL, {"submission": BENIGN_REPORT})
+    assert isinstance(review, Review)
+    tactics = {
+        tactic
+        for entry in load_pack("attack_techniques").entries.values()
+        for tactic in entry["tactics"]
+    } - {"reconnaissance", "resource-development"}
+    bullet = re.compile(r"^\s*- ([a-z]+(?:-[a-z]+)*): ", re.MULTILINE)
+
+    for prompt in (SYSTEM_PROMPT, review.messages[0]["content"]):
+        assert sorted(bullet.findall(prompt)) == sorted(tactics)
 
 
 def test_the_challengers_usable_checks_reach_the_model_and_the_next_report_is_ruled() -> None:
