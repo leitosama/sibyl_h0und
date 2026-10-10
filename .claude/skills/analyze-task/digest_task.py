@@ -20,6 +20,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import registry  # noqa: E402
+from runview import run_tag, run_ts  # noqa: E402
 from taskdigest import (  # noqa: E402
     append_triage,
     build,
@@ -34,20 +36,31 @@ from sibyl_h0und.replay import DEFAULT_TRACES  # noqa: E402
 
 
 def resolve_run(arg: str) -> Path:
-    """Return the run directory named by `arg`, or the newest one for `latest`."""
-    if arg != "latest":
-        return Path(arg)
-    runs = [p for p in DEFAULT_TRACES.glob("*/") if p.is_dir()]
-    if not runs:
-        raise SystemExit(f"no runs under {DEFAULT_TRACES}")
-    return max(runs, key=lambda p: p.stat().st_mtime)
+    """Return the run directory named by a path, a tag such as `G1019`, or `latest`."""
+    runs = [p for p in DEFAULT_TRACES.glob("*/") if p.is_dir() and run_ts(p.name) is not None]
+    if arg == "latest":
+        if not runs:
+            raise SystemExit(f"no runs under {DEFAULT_TRACES}")
+        return max(runs, key=lambda p: p.stat().st_mtime)
+    if len(arg) == 5 and arg[0] in "GP" and arg[1:].isdigit():
+        tagged = [p for p in runs if run_tag(p.name, "graded" if arg[0] == "G" else "p") == arg]
+        if tagged:
+            return max(tagged, key=lambda p: run_ts(p.name) or 0.0)
+        for entry in registry.load().values():
+            if entry.get("tag") == arg:
+                return Path(entry["path"])
+        raise SystemExit(f"no run {arg} under {DEFAULT_TRACES} or in the registry")
+    return Path(arg)
 
 
 def main() -> None:
     """Parse arguments and print the digest or one event."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("run", help="run directory or `latest`")
+    parser.add_argument("run", nargs="?", help="run directory, run tag (G1019) or `latest`")
     parser.add_argument("number", type=int, nargs="?", help="task number in the run")
+    parser.add_argument(
+        "--runs", action="store_true", help="list the registry, or expand RUN (a tag or run_id)"
+    )
     parser.add_argument("--event", type=int, help="print the event with this seq instead")
     parser.add_argument("--limit", type=int, default=2000, help="characters of the event payload")
     parser.add_argument("--summary", action="store_true", help="run table from monitor.jsonl")
@@ -57,6 +70,19 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.runs:
+        entries = registry.load()
+        wanted = [
+            e
+            for e in entries.values()
+            if args.run and args.run in (e.get("tag"), e["run_id"], e.get("dir"))
+        ]
+        if args.run and not wanted:
+            raise SystemExit(f"no run {args.run} in {registry.registry_path()}")
+        print(registry.expand(wanted[-1]) if wanted else registry.table(entries))
+        return
+    if args.run is None:
+        parser.error("a run is required (a directory, a tag or `latest`)")
     if args.summary or args.compare:
         tables = [summarize(load_rows(resolve_run(args.run)))]
         if args.compare:

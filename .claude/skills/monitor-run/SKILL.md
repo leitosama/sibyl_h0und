@@ -36,61 +36,75 @@ start, stop or restart `h0und`, and propose changes to code and prompts only.
 
 ## Start
 
-1. Arm a Monitor with the maximum timeout:
-   `uv run python -u .claude/skills/monitor-run/watch_run.py [RUN_DIR] 2>&1`
-   (`--verbose` prints every task, `--seen <N>` skips tasks up to N,
-   `--mode` forces a mode).
-   - Run just started, or about to: omit `RUN_DIR`. The script waits for the
-     first run directory created after it started (under `$TRACE_DIR`, default
-     `~/.local/share/sibyl_h0und/traces`), so it never picks an older run.
-   - Run already going, or the user named one: pass its directory.
-2. The script prints single lines, each starting with a fixed keyword or glyph:
+1. Arm one Monitor per session with the maximum timeout:
+   `uv run python -u .claude/skills/monitor-run/watch_run.py --follow 2>&1`
+   It attaches to every `h0und` run that is alive and to every run directory
+   created later (up to 2 active, 5 new per 30 minutes), so one Monitor covers
+   graded and practice runs, also two at once. Options: `--verbose` prints
+   every task, `--seen <N>` skips tasks up to N, `--mode` forces a mode,
+   `--total <N>` overrides the queue size (graded 40, practice 30),
+   `--register all` also records practice runs. Passing run directories
+   instead of `--follow` watches exactly those.
+   Arm it before the run starts, or right after; do not start a run without it.
+2. Every run has a tag (`G1019` graded, `P1023` practice) that starts its
+   lines. The script prints single lines, each starting with a keyword or glyph:
 
    | Line | Meaning | You do |
    | --- | --- | --- |
-   | `MODE …` | mode, agent, label, model (once); `MODE MISMATCH` when `--mode` contradicts the traces | relay; push on MISMATCH |
-   | `⚠`/`✖ #NNN verdict · flags [gates] · calls · tok` + an indented reason | a flagged task | triage (below) |
-   | `Σ N/40 · ✔ ⚠ ✖ · ⌀calls · tok · ETA · DEEP: …` | totals every 5 tasks | relay |
-   | `DASHBOARD <RUN_DIR>` | every 10 tasks and at the end | refresh the dashboard (below) |
-   | `STALL …` | 5 quiet minutes while `h0und` runs | relay; push |
-   | `RUN ENDED …` | traces quiet and `h0und` gone (the script exits) | relay the `Σ` line; push |
+   | `Watching <tag> <RUN_DIR>` | a run attached (keep the tag → directory map) | nothing |
+   | `MODE <tag> …` | mode, agent, label, model (once); `MODE MISMATCH` when `--mode` contradicts the traces | relay; push on MISMATCH |
+   | `LIMIT active n/2 · new runs in 30m n/5` | a run would break a final rule | relay; push |
+   | `⚠`/`✖ <tag> #NNN verdict · flags [gates] · calls · tok` + an indented reason | a flagged task | triage (below) |
+   | `Σ <tag> N/40 · ✔ ⚠ ✖ · ⌀calls · tok · ETA · DEEP k: …` | totals every 5 tasks | relay |
+   | `DASHBOARD <tag> <RUN_DIR>` | every 10 tasks and at the end | refresh that run's dashboard |
+   | `STALL <tag> …` | quiet for 10 min (graded) or 5 min (practice) while its process runs | relay; push |
+   | `RUN ENDED <tag> ended\|aborted …` | its `h0und` process is gone | relay the `Σ` line; push |
 
-3. When the Monitor expires, re-arm it with the same `RUN_DIR`. Tasks already
-   in `monitor.log` and `monitor.jsonl` are not printed again.
+3. When the Monitor expires, re-arm it the same way. Tasks already in
+   `monitor.log` and `monitor.jsonl` are not printed again, and runs that
+   are still alive are re-attached.
 
 ## What the user sees
 
 The user watches an interactive session, so each surface has one job and the
 prose is kept out:
 
-- **Status line** (no tokens): `statusline.py` shows progress, ✔/⚠/✖, ⌀calls,
-  tokens, ETA, the running task and DEEP candidates, refreshed by a timer.
-  Enable it once in `.claude/settings.local.json`:
+- **Status line** (no tokens): `statusline.py` shows a line per active run
+  (tag, progress `N/40` or `N/30`, ✔/⚠/✖, ⌀calls, tokens, ETA, the running
+  task, DEEP candidates) and a limits line `starts 30m n/5 · active n/2`,
+  refreshed by a timer. Enable it once in `.claude/settings.local.json`:
   `{"statusLine": {"type": "command", "command": "python3 .claude/skills/monitor-run/statusline.py", "refreshInterval": 5}}`.
-  `MONITOR_RUN_DIR` pins a run, otherwise the newest under `$TRACE_DIR`.
+  `MONITOR_RUN_DIR` pins one run, otherwise the newest under `$TRACE_DIR`.
 - **Event lines**: copy the script's line verbatim, add only the triage
   answer. No paths, no environment names, no prose around it.
 - **Sub-agent panel**: each triage is a background agent whose `description`
   is `Triage #NNN flags`, all started in one turn.
 - **Push**: `PushNotification` with the event line on `DEEP`, `STALL`,
   `RUN ENDED` and `MODE MISMATCH` only.
-- **Dashboard**: on `DASHBOARD <RUN_DIR>` run
+- **Dashboard**: on `DASHBOARD <tag> <RUN_DIR>` run
   `python3 .claude/skills/monitor-run/render_dashboard.py <RUN_DIR>` and publish
   the printed `dashboard.html` with the Artifact tool, the same path each time
-  (icon `chart`; first publish only), so the URL stays one. The page holds
+  (icon `chart`; first publish only), so each run keeps one URL. The page holds
   counts, flags and ids only.
+- **Registry**: graded runs are written to `final_runs.jsonl` by the watcher
+  (full `run_id`, `task_id`, trace file, verdict, flags, triage) and their
+  directory gets a `KEEP` file. When a graded run ends, save a memory pointer
+  to the registry (path, tag, `run_id`, model) so a later session starts from
+  it; `digest_task.py --runs [TAG]` reads it.
 
 ## For each flagged line
 
 Mechanical, no opinion of your own:
 
 1. Run `uv run python .claude/skills/analyze-task/digest_task.py <RUN_DIR> <N>`
-   (RUN_DIR is in the `Watching` line); keep its output as text.
+   (RUN_DIR is the one in the tag's `Watching` line; the tag works as well:
+   `... digest_task.py G1019 <N>`); keep its output as text.
 2. Spawn one `run-triage` agent (`model: sonnet`, description
-   `Triage #NNN <flags>`) per task with only that text as the prompt. Several
-   flagged lines at once: all agents in one turn. Never pass a trace path.
+   `Triage <tag> #NNN <flags>`) per task with only that text as the prompt.
+   Several flagged lines at once: all agents in one turn. Never pass a trace
+   path.
 3. Record the answer exactly as given:
-   `uv run python .claude/skills/analyze-task/digest_task.py <RUN_DIR> <N> --triage "<answer>"`
+   `uv run python .claude/skills/analyze-task/digest_task.py <tag|RUN_DIR> <N> --triage "<answer>"`
    (appends to `analysis.log`; the answer must start with `DEEP` or `SKIP`).
 4. Tell the user the event line plus ` → <answer>`; on `DEEP` also push it.
 
@@ -107,6 +121,7 @@ happens only when the user asks (`/analyze-task`, or "разбери №N"). `ST
 | `refused` | a report or answers were refused or a call was rejected |
 | `fallback` | the reporter failed or the draft was sent |
 | `tool_errors`, `llm_errors` | failed runtime or LLM calls |
+| `bad_id` | a call used an id the runtime does not know (`Unknown entity_id …`): the model corrupted or invented an id |
 | `not_terminated` | the task ended by anything but `terminated`, or with an error |
 | `low_q` | `Q` below `--wrong-below` (practice, scores visible) |
 | `rework` | 5 or more calls after the first try to finish: the gates sent the agent back |
