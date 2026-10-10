@@ -399,7 +399,7 @@ class Challenge(BaseModel):
 
 
 class RulingCheck(BaseModel):
-    """The challenger's own judgment of one of its checks from the facts (ADR 0027)."""
+    """The challenger's own judgment of one of its checks from the facts (ADR 0028)."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -412,7 +412,7 @@ class RulingCheck(BaseModel):
 
 
 class Ruling(BaseModel):
-    """The verdict the challenger rules once its checks were worked on (ADR 0027)."""
+    """The verdict the challenger rules once its checks were worked on (ADR 0028)."""
 
     model_config = ConfigDict(extra="ignore")
 

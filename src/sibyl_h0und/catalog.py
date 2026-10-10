@@ -264,7 +264,7 @@ class ToolCatalog:
         return found or list(DEFAULT_VERDICTS)
 
     def ruling_format(self) -> dict[str, Any]:
-        """Build the strict response format of the challenger's ruling (ADR 0027).
+        """Build the strict response format of the challenger's ruling (ADR 0028).
 
         Returns:
             OpenAI-compatible response format of a `Ruling` whose verdict is

@@ -146,7 +146,7 @@ def role_models(settings: Settings) -> dict[str, str]:
     """Return the models the settings give side turns instead of the default one.
 
     The challenger's ruling continues its own conversation, so it uses the
-    challenger's model (ADR 0025, 0027).
+    challenger's model (ADR 0025, 0028).
     """
     if settings.llm_challenger_model is None:
         return {}

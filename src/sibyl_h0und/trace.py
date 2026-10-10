@@ -171,7 +171,7 @@ class TaskTrace:
         *,
         flipped: bool,
     ) -> None:
-        """Write the challenger's ruling on the verdict of a report (ADR 0027).
+        """Write the challenger's ruling on the verdict of a report (ADR 0028).
 
         Args:
             draft: The head's report the ruling is about.

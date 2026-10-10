@@ -1,6 +1,6 @@
 # 0023. Отчёт пишет репортёр на дайджесте улик, вердикт остаётся за головой
 
-- Статус: Принято; вердикт после челленджа выносит челленджер — [0027](0027-challenger-rules-the-verdict.md)
+- Статус: Принято; вердикт после челленджа выносит челленджер — [0028](0028-challenger-rules-the-verdict.md)
 - Дата: 2026-10-09
 - Источник: [issue #39](https://github.com/leitosama/sibyl_h0und/issues/39), дизайн [finish-gate.md](../finish-gate.md); развивает [0022](0022-benign-challenger.md), дополняет [0007](0007-compact-llm-context.md), [0013](0013-minimal-report.md), [0018](0018-refuse-empty-report-once.md)
 

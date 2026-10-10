@@ -3,7 +3,7 @@
 The agent loop asks `before_call` what to do with the model's call and gives
 the runtime's answer to `after_call`. When the call needs a side turn of the
 LLM first (the benign challenger and its ruling, the reporter; ADR 0022,
-0023, 0027), the loop runs it and gives its reply to `after_review`. The tool
+0023, 0028), the loop runs it and gives its reply to `after_review`. The tool
 catalog, GraphLedger, the `still_open` merge, the local knowledge lookup, the
 side turns' requests, the wording of local answers and the trace events of
 those decisions all live here.
@@ -100,7 +100,7 @@ Return exactly one JSON object matching the supplied schema, with no prose.
 """.strip()
 JUDGE_ROLE = "judge"
 # Continues the challenger's conversation once the head has worked on its
-# checks: the challenger rules on the verdict (ADR 0027). General principles only.
+# checks: the challenger rules on the verdict (ADR 0028). General principles only.
 JUDGE_PROMPT = """
 Arguing is over: you now decide the verdict, and the report is written for your verdict.
 Since your challenge the investigation has worked on your checks. `new_evidence` holds every
@@ -178,7 +178,7 @@ CHALLENGE_REPAIR = (
     "`unvisited_relation_ids`. Return the whole challenge again as one JSON object matching "
     "the schema."
 )
-# What the head is told with the challenger's case: it gathers, the challenger rules (ADR 0027).
+# What the head is told with the challenger's case: it gathers, the challenger rules (ADR 0028).
 CHALLENGE_ANSWER = (
     "A benign verdict overrules the detection that raised this alert, so a reviewer who did "
     "not see your reasoning read the same evidence and argues it is an attack. `challenge` "
@@ -290,7 +290,7 @@ class Investigation:
         self._benign_challenged = False
         # The challenger's case the head was given, for the reporter.
         self._challenge_record: dict[str, Any] | None = None
-        # The challenger's request and case, which its ruling continues (ADR 0027).
+        # The challenger's request and case, which its ruling continues (ADR 0028).
         self._judge_opening: list[dict[str, Any]] | None = None
         # Each object as the challenger saw it, to show the ruling only what changed.
         self._challenged_objects: dict[str, str] = {}
@@ -343,7 +343,7 @@ class Investigation:
         first benign report outside the finish-only mode goes to the challenger
         first (ADR 0020, 0022), and the first report after its checks goes back
         to the challenger for a ruling on the verdict; a report that keeps a
-        verdict the challenger overruled is refused once (ADR 0027). A report
+        verdict the challenger overruled is refused once (ADR 0028). A report
         that is to be sent goes to the reporter first (ADR 0023).
 
         Args:

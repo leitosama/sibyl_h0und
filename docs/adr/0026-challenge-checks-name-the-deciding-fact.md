@@ -1,6 +1,6 @@
 # 0026. Проверка челленджера называет решающий факт, голова отвечает наблюдённым значением
 
-- Статус: Принято; ответы головы в `current_state` заменены [0027](0027-challenger-rules-the-verdict.md)
+- Статус: Принято; ответы головы в `current_state` заменены [0028](0028-challenger-rules-the-verdict.md)
 - Дата: 2026-10-09
 - Источник: [issue #52](https://github.com/leitosama/sibyl_h0und/issues/52), run `practice`
   `20261009T083824Z`; дополняет [0022](0022-benign-challenger.md),

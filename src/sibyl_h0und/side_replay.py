@@ -1,4 +1,4 @@
-"""Offline harness of the finish gate's side turns over saved task traces (ADR 0022, 0023, 0027).
+"""Offline harness of the finish gate's side turns over saved task traces (ADR 0022, 0023, 0028).
 
 No runtime is involved: a trace already holds every tool response. For each
 task the harness replays the runtime calls and reports as the live agent
