@@ -1,5 +1,6 @@
 import time
 from pathlib import Path
+from textwrap import indent
 from typing import Any
 
 from loguru import logger
@@ -13,7 +14,13 @@ from bluesec1_client import (
 )
 from sibyl_h0und.budget import DEFAULT_MAX_RUNTIME_CALLS, CallBudget
 from sibyl_h0und.catalog import FINISH_TOOL
-from sibyl_h0und.investigation import Investigation, LocalAnswer, Review, Send
+from sibyl_h0und.investigation import (
+    TACTIC_CHECKS,
+    Investigation,
+    LocalAnswer,
+    Review,
+    Send,
+)
 from sibyl_h0und.llm import StructuredStepClient, render_json
 from sibyl_h0und.outcome import ToolOutcome
 from sibyl_h0und.trace import TaskTrace, elapsed_ms, run_trace_dir, task_trace_path
@@ -73,10 +80,10 @@ hypotheses and the evidence for and against each.
    the types that show what it did: process creation, file writes, executions, registry
    and service changes.
 3. Place it on the kill chain, with MITRE ATT&CK as the map. For each notable action,
-   name the tactic and technique it would be if hostile. An alert is one stage of a
-   longer chain, so always look one stage back and one stage forward, whatever the
-   verdict seems to be. That usually takes two to four calls, more when the chain goes
-   on, and is worth them.
+   name the tactic and technique it would be if hostile, and answer that tactic's check
+   below from the evidence. An alert is one stage of a longer chain, so always look one
+   stage back and one stage forward, whatever the verdict seems to be. That usually
+   takes two to four calls, more when the chain goes on, and is worth them.
    - Back: how did it start? Initial access, delivery or execution: the parent chain,
      the logon and its source host, the email, download, share, service or task that
      launched it, an inbound connection.
@@ -87,15 +94,18 @@ hypotheses and the evidence for and against each.
    and what it did. A busy program (a browser, a shell, an agent) can hide one hostile
    action among many ordinary ones: look at the kinds of actions it took, not only the
    first few.
+{indent(TACTIC_CHECKS, "   ")}
 4. Test. For each hypothesis, say what would confirm or refute it, check it against the
    knowledge vocabulary and fetch that evidence from the graph.
 5. Decide. Before a benign verdict you must have looked one stage back and one stage
    forward (phase 3), opened every kind of outgoing relation of the trigger process at
    least once, and opened the entity that explains its legitimacy (the account, the
    logon or the parent job); you must also be able to say why the detection fired and
-   why that is not an attack here. Before a malicious verdict you must be able to name
-   the techniques and the entities that carried them out. In both cases, state the
-   strongest case for the opposite verdict and why the evidence rejects it.
+   why that is not an attack here. For every tactic the activity could belong to, the
+   answer to its check (phase 3) must be a positive explanation from the evidence.
+   Before a malicious verdict you must be able to name the techniques and the entities
+   that carried them out. In both cases, state the strongest case for the opposite
+   verdict and why the evidence rejects it.
 6. Report with `{FINISH_TOOL}`.
 
 Impact and business activity:
