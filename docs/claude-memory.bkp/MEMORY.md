@@ -1,0 +1,3 @@
+- [GLM-5.3 not usable](glm-5-3-not-usable.md) — too slow per step and corrupts ids; user rejected it 2026-10-07
+- [Run env behind NGFW](ngfw-run-env.md) — grpc_proxy, TLS roots and SSL_CERT_FILE needed to reach runtime and LiteLLM
+- [Final run limits](final-run-limits.md) — 2 concurrent runs, 5 per 30 min, 15 min wait; scores invisible, analyses matter
